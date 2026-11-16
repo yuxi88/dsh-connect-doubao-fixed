@@ -16,6 +16,17 @@
 >
 > 因此本仓库**不构成「线路可用」的保证**，仅在插件加载层面可用。
 
+> [!NOTE]
+> **来源声明 / Attribution**
+>
+> 本仓库为**个人修复备份**，并非原创作品，也不隶属于原作者。
+>
+> - 上游原始项目：[Wahwayhale/dsh-connect-doubao](https://github.com/Wahwayhale/dsh-connect-doubao)，采用 **MIT License**（本仓库保留其 `LICENSE` 文件与版权声明）。
+> - 本版本源码来自未合并的 PR [#16](https://github.com/Wahwayhale/dsh-connect-doubao/pull/16) 所在 fork：[Chsw-CC/dsh-connect-doubao-plus](https://github.com/Chsw-CC/dsh-connect-doubao-plus)。
+> - 版本 0.9.0，由上述 fork 源码使用 DSH 自带 bun 编译而成。
+>
+> 保留原 MIT 授权条款；原作者保留所有权利。若原作者不希望此备份公开，请联系我，我会立即删除。
+
 # DSH Connect Doubao Plus
 
 > 把**豆包（Doubao）账号**接入 DeepSeek Harness：实时读取豆包网页端与桌面端菜单，
