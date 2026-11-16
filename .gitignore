@@ -1,0 +1,34 @@
+# Build output is never tracked. tsdown names the shared chunks by content hash,
+# so every build rewrote these files and the diff said nothing about the change.
+# Publishing is unaffected: npm pack runs prepack -> build, and the package's
+# files field picks lib up from the tarball.
+lib/
+
+node_modules/
+.pnpm-store/
+dist/
+coverage/
+*.log
+.env
+.DS_Store
+
+# Screenshots are release assets: `screenshots.json` lists them, both READMEs
+# embed them, and the plugin-market entry cannot render a card without them.
+# These two rules are DEFENSIVE, not load-bearing today: nothing above matches
+# `docs/`, so as the repository stands they change no outcome. They exist so a
+# future broad rule (`*.png`, `assets/`, a catch-all) cannot silently swallow the
+# marketplace images without anyone noticing.
+!docs/assets/
+!docs/assets/*.png
+
+# 本机运行时由 doubao_imagemodels.py --sync 生成，不入库
+image-models.json
+
+# 本地调试脚本
+exp_task.js
+
+# 提交市场 PR 时的临时工作目录
+.pr/
+
+# 提市场 PR 时克隆的上游仓库，不入库
+awesome-dsh-plugin/

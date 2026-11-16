@@ -1,0 +1,28 @@
+# Submission for awesome-dsh-plugin
+#
+# Target path:
+#   data/plugins/Chsw-CC__dsh-connect-doubao-plus.yml
+#
+# Rules this file satisfies (see MARKET-SUBMISSION.md §2.2):
+#   R1  `url` must match the repository URL EXACTLY (no `.git` suffix here)
+#   R2  `dsh.bundle` manifest is declared in package.json + repo root has cordis.patch.yml  [done]
+#   R11 official @deepseek-ai/* packages use peerDependencies                            [done]
+#   *   only `description.en` is required; `zh` is optional
+#   *   `description.en` must end with a period
+#   *   any value containing ": " MUST be quoted, or the YAML parser fails
+#
+# Validate locally before opening the PR:
+#   node scripts/validate-submission.mjs
+#
+# This is a FORK of Wahwayhale/dsh-connect-doubao. The entry stays separate on
+# purpose: the fork ships cross-platform session sealing plus the stream-abort /
+# same-turn-fallback hardening, and has its own id (`dsh-connect-doubao-plus`),
+# so it can be installed alongside the upstream plugin without an id clash.
+
+url: "https://github.com/Chsw-CC/dsh-connect-doubao-plus"
+name: "Chsw-CC/dsh-connect-doubao-plus"
+category: model
+description:
+  en: 'Fork of Wahwayhale/dsh-connect-doubao that connects a Doubao account to DeepSeek Harness as a model provider after one browser QR sign-in. Runs on Windows, macOS and Linux, sealing the session with DPAPI on Windows and with AES-256-GCM under a local 0600 key elsewhere, and discovers the sign-in browser per platform. On top of the upstream feature set — live model discovery from the Doubao web and desktop menus, inline composer billing multipliers, per-model thinking ladders, 「工作任务」 task-mode models spending paid quota, chain-of-thought passthrough, Seedream image generation preferring original assets, and a read-only remaining-quota panel — it also hardens the stream path. A rejected conversation id is never reused, an in-turn fallback re-sends into a fresh conversation, three consecutive upstream failures trip a local circuit valve, conversation memory expires after seven days, and an upstream abort now stops the server-side generation through break_stream_msg so a dead thread stops burning quota.'
+  zh: 'Wahwayhale/dsh-connect-doubao 的 fork，浏览器扫码登录一次即可把豆包账号接入 DeepSeek Harness 作为模型提供方。支持 Windows / macOS / Linux：Windows 用 DPAPI 密封会话，其它平台用本地 0600 密钥的 AES-256-GCM，并按平台各自查找登录用浏览器。在上游功能（实时读取豆包菜单的模型发现、对话框计费倍率、逐模型思考档位、「工作任务」模型走会员付费额度、思考链透传、优先取原图的 Seedream 生图、只读剩余额度看板）之上，加固了流式链路：被拒的会话 id 不再复用、同一 turn 内改发新会话完成回退、连续三次上游失败触发本地熔断阀、会话记忆 7 天后过期，并且流被中断时会调用 break_stream_msg 停掉服务端生成，不让空转线程继续烧额度。'
+icon: https://raw.githubusercontent.com/Chsw-CC/dsh-connect-doubao-plus/main/docs/assets/dsh-connect-doubao-icon.png

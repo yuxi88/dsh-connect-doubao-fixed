@@ -1,0 +1,578 @@
+# 更新记录
+
+本文件记录每个发布版本对用户可见的变化。版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
+
+---
+
+## 0.9.0 — 2026-11-15
+
+> 更名版本：fork 从 `dsh-connect-doubao` 改为 **`dsh-connect-doubao-plus`**，
+> 仓库同步改为 [Chsw-CC/dsh-connect-doubao-plus](https://github.com/Chsw-CC/dsh-connect-doubao-plus)，
+> 并投稿到 awesome-dsh-plugin 插件市场。
+
+### 变更
+
+- **包名 / 插件 id 改为 `dsh-connect-doubao-plus`**：`package.json` 的 `name` / `displayName` /
+  三个 `bin` 入口、`cordis.patch.yml` 的 `id` 与 `name`、`PLUGIN_ID`、客户端 `name` 与
+  locale 命名空间、只读路由 `/plugins/dsh-connect-doubao-plus/*`、设置页 section id、
+  客户端 bundle 的 `__ModuleLoader__.load({ id })` 全部一起改，避免宿主里出现两套 id。
+- **仓库元数据指向本 fork**：`repository` / `homepage` / `bugs` 不再是上游
+  `Wahwayhale/dsh-connect-doubao`；上游署名（fork 说明、贡献者列表）原样保留。
+- **不迁移本地数据**：设置文件仍是 `~/.dsh/dsh-connect-doubao.settings.json`，凭据与生图缓存
+  路径不变 —— 升级不需要重新扫码登录，已有设置不会丢。
+- **安装说明改写**：本仓库不发 npm；`prepack` 依赖 `npm`，而 Harness 内置运行时只有 `node`，
+  因此 git 地址直装会在 prepare 阶段失败。README 改为 GitHub Release tarball 与本地源码目录两种方式。
+
+## 0.8.0 — 2026-11-15
+
+> 同步上游 0.7.0 / 0.7.1，合入社区 PR #12（macOS / Linux 浏览器扫码登录，关联 issue #10），
+> 并加入本仓库自有修复：会话续传加固与流中断即停。
+
+### 新增（本仓库）
+
+- **流被掐断即停豆包端生成**（`doubao-shim`）：客户端断开、空闲看门狗、710020202 同turn回退
+  触发 abort 时调用网页端 `break_stream_msg`（cmd 2240, break_reason=7），按 `conversation_id` +
+  `question_id` 停掉本轮服务端生成，旧线程不再空转烧积分；独立 5s 超时、fire-and-forget。
+- **同turn回退被拒续传**：被拒的 conversation id 不再复用（改发前先停被拒线程），同一 turn 内
+  改发新会话完成续传；连续三次上游失败触发**熔断阀**，会话记忆有效期收敛为 7 天（`SESSION_TTL_MS`）。
+
+### 同步上游
+
+- **0.7.0**：在线菜单模型发现、对话框计费倍率展示、逐模型思考档位、思考链（CoT）推理透传、
+  原生 Token 用量与会话统计。
+- **0.7.1**：工具模拟默认开启、解析加固与多轮上下文修复；生图直取无水印原图。
+
+### 跨平台登录（社区 PR #12）
+
+#### 新增
+
+- **跨平台会话密封**（`doubao-auth`）：Windows 继续用 DPAPI；macOS / Linux 改用 AES-256-GCM，
+  密钥存于 `~/.dsh/doubao-credentials.key`（0600），密封文件带 `DSHD1:` 版本标记。
+- **跨平台浏览器查找**（`doubao-auth-browser`）：`findBrowser()` 按 `process.platform` 选择候选
+  （macOS `.app` 包 / Linux 可执行文件），并支持 `DSH_DOUBAO_CHROME` 显式指定任意 Chromium 二进制。
+
+#### 修复
+
+- **POSIX 上登录浏览器残留**（`doubao-auth-browser`）：原 `terminate()` 用 `taskkill`，而
+  `spawnSync` 在 ENOENT 时不抛异常，导致 `child.kill()` 兜底从不执行、调试端口 9333 被占用。
+  现按平台分支，非 Windows 直接 `SIGTERM`。
+
+#### 测试
+
+- 新增 `tests/macos-compat.test.ts`：覆盖 `DSH_DOUBAO_CHROME` 覆盖、`terminate()` 平台分支，
+  以及隔离 HOME 下的 AES-256-GCM 密封往返与篡改拒绝。
+
+## 0.7.1 — 2026-11-14
+
+> 这一版把「提示词模拟工具调用」从实验性默认关闭改为**默认开启**，并加固了解析与多轮上下文，让豆包及客户端接入的第三方模型（DeepSeek / Kimi / GLM 等）开箱即能驱动 DSH 的本地工具。
+
+### 变更
+
+- **工具模拟默认开启**（`doubao-config` / `doubao-shim`）：`toolEmulation` 默认值由 `false` 改为 `true`，`toolEmulationOf` 改为「除非显式设为 `false` 否则开启」，shim 的 `emulationOn` 回退同步改为 `true`。新装用户无需手动打开开关，即可让豆包通过 OpenAI `tools` → `doubao-tool` 围栏 → `tool_calls` 的转译调用本地工具。设置页文案同步更新，去掉「实验性 / 默认关闭」措辞。
+
+### 修复与加固
+
+- **工具调用解析支持更多形态**（`doubao-tools`）：
+  - 单个围栏内的 **JSON 数组**（一次并行多个工具调用）现在会被全部解析，而不再只取第一个。
+  - 兼容 **OpenAI 嵌套结构** `{"type":"function","function":{"name":...,"arguments":...}}`。
+  - 新增 ```json 围栏回退：当模型改用 ```json 输出严格包含 `name` 与 `arguments`/`params` 的对象（或数组）时也能识别并转译为标准 `tool_calls`；非工具形状的普通 JSON 代码块保持原样不误吞。
+- **多轮工具调用上下文不再丢失**（`doubao-shim`）：`buildPrompt` 展开历史消息时，若 `assistant` 消息正文为空但带有 `tool_calls`，此前会被整条跳过；现在会把它还原为 ```doubao-tool 围栏拼回上下文，与随后的 `[tool result]` 正确配对，避免续接轮里模型「忘记」自己刚发起过哪个调用。参数为已解析对象或非法 JSON 字符串时均做了安全兜底。
+
+### 测试与校验
+
+- 新增解析回归：JSON 数组多调用、OpenAI `function` 包装、```json 围栏回退各一例。
+- 更新默认值断言：`toolEmulation` 默认应为 `true`。
+- 新增 `vitest.config.ts`，把测试范围限定在 `tests/`，避免误扫本机克隆的市场仓库（`awesome-dsh-plugin/`）里不相干的脚本。
+
+---
+
+## 0.7.0 — 2026-11-13
+
+> 这一版补齐了在线模型发现链路，把思考链（CoT）、对话框模型倍率展示、以及 DSH 原生 Token 用量与会话统计全部接了进来。
+
+### 新增
+
+- **对话框模型选择倍率与对比弹窗**（`DoubaoRateControls` / `DoubaoCatalogStore`）
+  - 接入 DSH 对话框插槽 `conversation.input.model.label` 与 `conversation.input.right`，在模型下拉选项中直接显示豆包模型计费倍率与活动优惠标签，在输入框右侧提供当前倍率胶囊控件。
+  - 点击输入框右侧倍率控件可弹出所有已发现豆包模型的倍率对比面板，并支持手动强制刷新目录；非 Doubao 供应商保持宿主原有徽标与渲染样式不变。
+- **思考链（深度思考 CoT）完整接入**（`doubao-upstream` / `doubao-shim`）
+  - 完善 `block_type: 10040` 思考容器、`parent_id` 思考子块、`text_block.summary` 摘要式推理、无 `id` 的 `CHUNK_DELTA` 状态追踪路由（`BlockCollectState`），以及占位标题过滤与 `STREAM_MSG_NOTIFY` 回放去重，确保思考过程完整输出到 OpenAI `reasoning_content` 与 DSH `reasoning-delta`。
+  - 支持普通对话模型传入 `reasoning_effort: "off"` 显式关闭深度思考；「工作任务」模型首轮默认携带 `conversation_mode: "2"`。
+- **DSH 原生 Token 用量与会话统计**（`doubao-tokens` / `doubao-stats` / `DoubaoQuotaCard`）
+  - 为 `/v1/chat/completions` 流式（含 `stream_options.include_usage: false` 控制）与非流式响应生成确定性 OpenAI `usage`（满足 DSH `TokenMeter` 4 字符/token 下限要求，多轮 `conversation_id` 续接前缀记入 `prompt_tokens_details.cached_tokens`，思考过程记入 `completion_tokens_details.reasoning_tokens`，兼容模拟工具调用词元统计），直接驱动 DSH 顶部/状态栏 Token 用量与会话统计。
+  - 在 `doubao-upstream` 解析任务轮次上游上报的 `context_window_usage`、`tea_tags_time_cost`（`ack_cost_time` / `first_packet_cost_time`）、`finish_time_ms` 与 `finish_reason_chat`。
+  - 新增内存统计收集器 `DoubaoStatsTracker`（最多保留 64 个不透明会话键，不记录提示词/凭据原文）与路由 `GET|POST /plugins/dsh-connect-doubao/stats`（支持带 `x-dsh-doubao-write` 校验头的清零操作），并在插件设置页新增「会话统计与 Token 用量」面板展示请求数、续接数、Token 细分、缓存命中率、平均 TTFT、生成速率（tok/s）及最近一轮上游窗口拆解。
+
+### 修复
+
+- **在线模型发现与刷新联动**（`doubao-discovery` / `doubao-status`）：新增 `POST /alice/slot/action_bar_v3/brief_list` 在线菜单解析（支持 `menu_conf_v2` 与 `menu_conf` 回退）、多 Profile 目录候选扫描及遍历所有 `BriefListRequestCache` 键；点击「刷新」或完成浏览器扫码重登录后自动触发在线刷新并重建适配器模型列表。
+- **端口绑定通知与勾选列表初始化**（`doubao-adapter` / `index`）：新增 `onBaseUrlReady` 回调在 shim 端口就绪后通知宿主刷新可用路由，并使用合并后的 `current`（而非 Loader 原始配置）初始化 `enabledModelIds`。
+- **额度耗尽判定误拦截**（`doubao-quota`）：通过 `evaluateQuotaExhausted` 仅在所有有效额度分组都耗尽时才判定账号额度用完，避免活动赠送额度用尽误拦常规 5 小时/周额度请求。
+- **生图路由隔离与提示词清理**（`doubao-shim` / `doubao-upstream`）：`image-gen`（兼容大小写与 `doubao/` 前缀）强制关闭深度思考、跳过工具模拟与多轮上下文续接；`buildImagePrompt` 放宽描述上限至 2000 字符并清理 `<system-reminder>`、`<hindsight_page_refresh>` 及框架上下文注入文本；无水印原图缺失时支持回退 `image_ori`。
+
+### 测试与校验
+
+- 新增思维链、倍率控件、Token 估算、会话统计路由与设置页卡片、以及通过 `@deepseek-ai/dsh-llm-pi-ai`（`PiAiAdapter`）真实串联 loopback shim 的端到端集成测试，覆盖流式/非流式、多轮缓存增长与模拟工具调用。
+
+---
+
+## 0.6.1 — 2026-11-12
+
+> 这一版把「模型清单」从一张硬编码表，改成照抄豆包客户端菜单：有什么模型、各自多少倍率、
+> 各自支持哪几档思考强度，全部实时读出来。三处缺陷叠在一起，任何一处单修都看不出效果。
+
+### 修复
+
+- **清单读错了缓存目录** —— `CACHE_DB_DIRS` 只列了 `chrome_doubao-launcher_0`，该库最后
+  一次写入是 2026-09-17，插件于是永远只看到 `0/3/4/5/9` 五条，而客户端菜单早已列出十二条。
+  现在优先读 `Default/Preferences` 里的 `saman.local_storage_for_web['frontend-request-cache']`
+  （应用每次刷新菜单都会重写，是唯一还保持最新的源），IndexedDB 退为兜底，并补上
+  `chrome_doubao-chat_0`。
+- **键名校验卡掉了新模型** —— `looksLikeModelKey` 原为 `/^[\w-]{1,24}$/`，而第三方模型键长
+  27–37（`person-kimi-k3-1-pro-highspeed-261111` 是 37 字符），于是 Kimi 高速 / GLM Flash /
+  DeepSeek V4 系列被逐条丢弃。改为按形状校验、长度上限 64。
+- **刷新按钮其实不刷新** —— 卡片的「刷新」发的是 GET，而清 memo 的分支挂在 POST 上，于是它把
+  十分钟前的 memo 原样又画了一遍。改为 POST（带 `x-dsh-doubao-write` 头），现在点一次就真重读。
+- **极高 / 最高 根本发不出去** —— shim 的 `toDoubaoLevel` 只认 low/mid/high，序号 6 和 7 被静默
+  夹到「高」，DeepSeek / Kimi / 2.1 Max 的上半档等于不存在。现在 6/7 直通。
+- **档位顺序被排序打乱** —— 「自动」声明的是 低(3) / 中(8) / 高(5)，按数值排序会把「高」排成
+  中间档、8 排成最强档。改为保留菜单顺序。
+- **非标准档位被吞掉** —— `findReasoningLevel` 以前只认三个名字，序号 8 会退回「高」；现在未知
+  序号原样透传成一个临时档位，不会把用户选的那个换掉。
+
+### 新增
+
+- **倍率 / 优惠标签** —— 读客户端菜单的 `tag_list` 原样显示：`0.65x`、`0.46x` 这类是倍率，
+  `限时优惠 0.01x`、`小额免费` 这类是活动标签（描边样式区分，避免活动价被当成常价）。
+  卡片同时注明「倍率来自客户端菜单，本插件不参与计费，也无法核对实际扣费」。
+- **每个模型自己的思考档位** —— 菜单的 `reasoning_effort_config.option_list` 是逐模型的，而且
+  不统一：GLM 只有 低/高/最高（3/5/7），2.1 Lite 是 低/中/高（3/4/5）。以前统一用目录里那三档，
+  等于对 GLM 承诺了一个它没开的「中」。现在按模型自己的阶梯渲染，`thinkingLevelMap` 也据此生成。
+- **档位验证标记** —— 实测过的档位（3/4/5）实线；只在菜单里声明、还没在真实请求中验证的
+  （6 极高 / 7 最高）虚线，tooltip 里写明。
+
+### 其它
+
+- 新模型按 `default_mode` 归入对应模式：`mode_id: "3"` 的第三方模型走「工作任务」
+  （`agent_mode 1` / `conversation_mode 2` / `need_deep_think 10001`），不会被当成普通对话。
+- `findDoubaoModel` 对未见过的键改为原样透传，新增 `isKnownModelId` 区分「没有显示名」与
+  「不存在」——否则新模型会被静默换成豆包快速。
+- `toPiModel` 的 `thinkingLevelMap` 按模型阶梯生成：`xhigh` / `max` 只在模型真有这两档时给出
+  映射，否则为 `null`（pi-ai 把 `null` 读成「不提供」，而不是夹到相邻档）。
+- 卡片里的 `requested_model` 优先显示客户端原名。
+- 新增回归测试：长 `person-*` 键必须能解析、超长与含空格的键必须被拒、6/7 档位、未知序号透传、
+  逐模型阶梯、倍率原样保留。
+
+---
+
+## 0.6.0 — 2026-11-11
+
+> 模型清单从「只认五个老模型」修成「客户端菜单有什么就显示什么」。三处缺陷叠在一起，
+> 任何一处单修都看不出效果。
+
+### 修复
+
+- **清单读错了缓存目录**：`CACHE_DB_DIRS` 只列了 `chrome_doubao-launcher_0`，该库最后一次
+  写入是 2026-09-17，插件于是永远只看到 `0/3/4/5/9` 五条，而客户端菜单早已列出十二条。
+  现在优先读 `Default/Preferences` 里的 `saman.local_storage_for_web['frontend-request-cache']`
+  （应用每次刷新菜单都会重写，是唯一还保持最新的源），IndexedDB 退为兜底，并补上
+  `chrome_doubao-chat_0`。
+- **键名校验卡掉了新模型**：`looksLikeModelKey` 原为 `/^[\w-]{1,24}$/`，而第三方模型键长
+  27–37（`person-kimi-k3-1-pro-highspeed-261111` 37 字符），于是 Kimi 高速 / GLM Flash /
+  DeepSeek V4 系列被逐条丢弃。改为按形状校验、长度上限 64。
+- **刷新按钮其实不刷新**：卡片的「刷新」发的是 GET，而清 memo 的分支挂在 POST 上，
+  于是它把十年前的 memo 原样又画了一遍。改为 POST（带 `x-dsh-doubao-write`），
+  现在点一次就真重读缓存。
+
+### 其它
+
+- 新模型按 `default_mode` 归入对应模式：`mode_id: "3"` 的第三方模型走「工作任务」
+  （`agent_mode 1` / `conversation_mode 2` / `need_deep_think 10001`），不会被当成普通对话。
+- `findDoubaoModel` 对未见过的键改为原样透传 + `isKnownModelId` 区分「没名字」与「不存在」，
+  否则新模型会被静默换成豆包快速。
+- 卡片里的 `requested_model` 优先显示客户端原名。
+- 新增回归测试：长 `person-*` 键必须能解析、超长与含空格的键必须被拒。
+
+---
+## 0.6.0 — 2026-11-11
+
+> 生图这条路从「能出图」修到「在对话框里直接看到对的图」。三处都是实测出来的，不是推断。
+
+### 修复
+
+- **无水印**：生图回复里同时带着 `image_ori`（右下角有「豆包AI生成」）和 `image_ori_raw`
+  （原图）。原来取 `image_ori`，所以每张图都带 logo。现在优先 `image_ori_raw`，取不到才回落，
+  账号没开无水印档位时行为不变。
+- **提示词不再被框架文本污染**：DSH 一轮请求会带 7 条 message——开发者提示、运行时快照、
+  技能目录、MCP 列表、记忆页面——真正的用户描述夹在其中。原来取「最后一条 user 消息」，
+  拿到的是 `<system-reminder>` 块，于是豆包把 `turn 1 step 1`、工具名当成画面内容画了出来
+  （用户看到的 “1turn / tup / tun” 残影）。现在按三条标准筛：长度 ≤600 字符、不以 `<` 开头、
+  不含已知框架标记。
+- **自动补「生成图片：」前缀**：桌面客户端靠 `chat_ability.ability_param.reply_message_format`
+  改写正文，外部客户端没有这个钩子，服务端会把请求当普通对话回答。`withImagePrefix()` 补上
+  同样的改写；已有前缀不重复加，普通对话完全不受影响。
+- **模型 id 宽松匹配**：DSH 可能带 provider 前缀（`doubao/image-gen`）或大小写不同，
+  漏判会静默回落到完整 agent 提示词——这正是提示词被污染的另一半原因。
+
+### 其它
+
+- 生图版本名改为读插件根目录的 `image-models.json`（缺省 Seedream 5.5）。该文件由
+  `doubao_imagemodels.py --sync` 从服务端 `get_item_conf` 生成，服务端上新版本后改数据即可，
+  不用改代码。
+- 新增 `DSH_DOUBAO_DEBUG_PROMPT=1`：把实际发出的 prompt 与原始 messages 结构打到 stderr，
+  并追加到 `~/.dsh/doubao-prompt.log`。默认关闭。
+- 新增测试：无水印变体选择、前缀注入（含幂等与普通对话不受影响）。
+
+---
+
+## 0.5.0 — 2026-11-07
+
+> 取凭据的路只剩一条：**浏览器扫码登录**。上一轮加的 `authMode` 开关（客户端 / 浏览器）
+> 连同它背后的「解密豆包客户端 cookie」整条路径一起删掉 —— 不是弃用，是移除。理由是那条
+> 路径有个从外面修不好的缺陷：豆包客户端运行时对 `Default\Network\Cookies` 持**独占锁**，
+> 而本插件恰恰是为「客户端正在运行」的账号准备的；读不到就回退到 12 小时前的密封副本，
+> 服务端早已轮换会话，于是每个请求都被上游拒绝，本地状态却还显示「已登录」——用户既看不
+> 出问题也修不了。浏览器扫码没有这个死结：cookie 当场抓到、当场密封，不存在更旧的副本。
+> 已登录的浏览器会话**不受影响**（密封文件名沿用 `doubao-credentials-browser.dpapi`）。
+
+### 破坏性变更
+
+- **登录方式只剩「浏览器扫码登录」** —— 删除 `authMode` 设置项（config schema、自带设置文件、
+  路由、卡片单选、中英文案），插件永远读浏览器会话，没有第二个选项可选。
+- **删除 `/plugins/dsh-connect-doubao/profile` 路由与卡片里的「豆包数据目录」整节** ——
+  客户端 profile 选择器已无意义；保存路由的写入白名单同步去掉 `profileDir`，避免出现
+  「写进了磁盘但直到重启才生效」的半截状态。数据目录仍可通过设置文件的 `profileDir`
+  或环境变量 `DSH_DOUBAO_PROFILE` 指定，它现在只用于模型清单缓存与任务模式工作区。
+
+### 移除
+
+- `decryptFromProfile`、`decodeCookiePlaintext`、`decryptCookieValue`、SQLite 读取与
+  多 profile 回退（`loadDoubaoCredentials` 不再遍历候选，也不再做 stale-while-error）。
+- 12 小时密封缓存 `~/.dsh/doubao-credentials.dpapi`（`CREDENTIAL_CACHE_FILENAME` /
+  `saveCredentialCache` / `loadCredentialCache`）。**老版本留下的这个文件不再被读取**，
+  可以手工删除；留着也不会被当成登录态。
+
+### 修复
+
+- **账号状态把「未登录」误判成「网络失败」** —— 无登录态时的提示文案是中文，客户端
+  的状态分类只匹配英文关键字，于是回落成「连接豆包失败：请检查网络」。现在中文的
+  登录态/风控文案也参与分类。
+- **卡片与文档不再声称「复用客户端登录态」** —— 副标题、账号状态文案、README 中英两版
+  的前置条件、工作原理、平台支持、已知限制全部改成浏览器扫码，并写明不再解密客户端 cookie
+  的原因。
+
+### 思考（同批）
+
+- **深度思考默认开启** —— 以前每轮都是普通回合（`need_deep_think: 0`），模型选择器的
+  低/中/高只改 `reasoning_effort`，对思考没有任何作用。现在非「工作任务」模型发
+  `need_deep_think: 3` + `ext.use_deep_think: "3"`；「工作任务」模型（Lite / Pro / 自动）
+  保持官方客户端抓到的真实形态 `10001`。因为任务模型的形态是靠 `deepThink === undefined`
+  区分的，shim 对它们特意**不传**布尔值，否则会被降级成聊天形态。
+- **「豆包 快速」标记为不可推理** —— 实测深度思考全开、档位拉到高，它仍返回
+  `thinking: false` 且流里没有 `10040` 容器；同一请求换 2.1 Pro 立刻变 `thinking: true`。
+  于是它不再出现在推理档位的可选范围里，卡片清单也不再给它列低/中/高。发现路径也要
+  应用这条：客户端菜单把每条都标成可推理，所以判断放在发现之后，按实测清单收口。
+- **不再谎报「选了档位就会思考」** —— 这是上面两条要一起改的原因：只改开关不改挡位，
+  或只改挡位不改开关，都仍然看不到思考。
+
+> **思考正文仍然看不到，这是接口限制。** 2026-11-07 在官方客户端打开深度思考发一条真实
+> 消息并抓包对照：请求是 `need_deep_think: 10001`，响应里有 `10040` 思考容器和一个
+> `10091` 计时块，但容器的子块只有 `summary: "正在思考"`，`text_block.text` 只出现在
+> 正式答案里。也就是说连官方客户端都拿不到推理正文，插件无从转发。README 中英两版已写明。
+
+### 测试
+
+- 新增：登录路由只接受 `{"action":"login"}`（其它 body 一律 400，且 POST 必须带写标记）；
+  `src/doubao-auth.ts` 的客户端解密路径不得回归、只保留浏览器密封文件、`findDoubaoUserDataDir`
+  仍对外可用。
+- 新增：思考开关的上线形态 —— `deepThink: true` → `3`、`false` → `0`、
+  「工作任务」未设置 → `10001`，以及「豆包 快速」不可推理。四条都钉在
+  `tests/thinking.test.ts` 里，防止以后有人「顺手统一」成同一个值。
+- 同步：删除 `store.test.ts` 的 `authMode` 断言、`save-route.test.ts` 的 profile 路由与
+  `profileDir` 写入用例；`scripts/check-locale-literals.mjs` 改为「整张表逐条往返解码无损 +
+  双语齐备」，因为原来被钉死的那两条 Windows 路径文案随本节一起删除了。
+
+---
+
+## 0.4.1 — 2026-11-05
+
+> 「工作任务」模型接入批次：把豆包客户端里那三个**只能在工作任务模式跑**的条目
+> （2.1 Lite `seed-lite-7b`、2.1 Pro `5`、自动 `9`）真正接到 DSH 里，走的正是会员/
+> 活动付费额度。上一版把它们整个藏起来，理由是「外部客户端注册不进 CUA 运行时」——
+> 那个理由对了一半：运行时确实接不进去，但它不是必需的，`tool_local` 的三条 HTTP
+> 接口就够把一轮任务回合走完。新增 4 例回归测试（另改写 2 例旧的「必须隐藏」断言），
+> 全仓 189 例。
+
+### 新增
+
+- **豆包 2.1 Lite / 2.1 Pro / 自动 进入模型选择器** —— 选中任一条，请求自动切到
+  「工作任务」模式（`mode_id: "3"`、`agent_mode: 1`、`need_deep_think: 10001`、
+  新会话 `conversation_mode: 2`、`model_extra_params.input_token_limit: "256k"`，
+  `seed-lite-7b` 另带 `reasoning_effort`），`general_task_param` 带 `task_input_json`。
+  实机跑通：Lite 与 Pro 各一次纯文本回合，约 5.8 s，`server_model_tag` 为 `38`。
+- **`tool_local` 应答器** —— 任务模式下服务端会按 `${unique_key}:${device_id}:${aid}:message:${seq}`
+  的顺序下发本地工作区指令；插件并发轮询 `msg/ack`，遇到 `command: 6003`（`cmd_call`，
+  如 `local.workspace.apply`）就回 `upload_command_result` + `msg/complete`，遇到
+  `command: 6004`（`agent_finished`）收尾。**这是解开 `710010702` 的全部原因。**
+- **`CHUNK_DELTA` 增量帧** —— 任务模式的正文增量以无 `block_type` 包裹的
+  `{ text, id }` 形式下发，按 `id` 分流到 `reasoning_content` / 正文。
+
+### 修复
+
+- **选 `seed-lite-7b` / `5` 会被静默换成「豆包 快速」** —— `findDoubaoModel` 只在内置
+  清单里查，查不到就回落到 `'0'`。现在三条任务模型都在清单里，不再回落。
+- **`msg/ack` 批量查询必失败** —— `{ msg_ids: [0..6] }` 会整体报
+  `{"code":710010702}`，因为批里只要含一个服务端还没生成的 `seq`，整批就废。
+  现在严格单条轮询，逐 `seq` 递进。
+- **自动发现把工作任务模型全部隐藏** —— 上一版按名称前缀一律排除。现在改为只排除
+  `DOUBAO_UNAVAILABLE_MODELS`（仅剩「即将下线」的 `4`），并按内置清单补齐，避免本机
+  IndexedDB 只缓存了对话子集时任务模型消失。
+
+### 已知边界
+
+- 纯文本、不触发本地工具的小回合，服务端会在 `ext` 里标 `general_agent_task_mode: "simple"`
+  与 `mode_downgrade_reason: "success"`，此时**不扣**活动赠送额度（实测调用前后
+  `usedAmount` 恒为 782）。要消耗付费额度，得让它真的执行多步工具/文档任务。
+- `msg/ack` 的 `seq` 没有可查询的上界，应答器在流结束后最多再补 8 次轮询即退出。
+
+---
+
+## 0.4.0 — 2026-11-05
+
+> 稳定性与额度准确性批次：让「回答」在中断时说实话，让「停止」真的停下上游，让凭据不再经过
+> 子进程环境变量，让设置卡片不再对任何本机页面敞开；额度读数改成看「还剩多少」，并把一直在
+> 扣的活动赠送额度显示出来；卡片重做了一遍视觉。全部改动都带回归测试（新增 36 例，全仓
+> 187 例）。
+
+### 修复
+
+- **断流被当成完整回答** —— 豆包服务端提前断开连接时，插件只把缓冲区里已收到的那半截
+  文本当结果返回，并照样写 `finish_reason: "stop"` 和 `[DONE]`。用户看到的是一个语法
+  通顺、语义中断的回答，没有任何迹象表明它被截断了。现在以 `SSE_REPLY_END` 作为唯一
+  的完成依据：连接先断而该帧未到，就报「回答不完整（已收到 N 字符）」而不是假装成功。
+  特意**不可重试** —— 重试会新开一条线程，把这条线程上的上下文丢掉，比重打一次更糟。
+- **停止按钮停不下上游** —— 客户端断开后没有任何东西通知豆包那边停止生成，那一轮会一直
+  跑到结束，额度照扣，答案没人看。现在响应关闭即 `abort()`，并顺着 `fetch` 传到 socket。
+  顺带补上空闲看门狗：`DOUBAO_STREAM_IDLE_TIMEOUT_MS`（300 秒）此前定义了却从没被使用，
+  流静默这么久会主动中止，而不是把请求永远挂着。
+- **所有认不出的失败都被说成网络问题** —— 分类器对未知错误一律 `network`，shim 又把它
+  标成可重试的 `TIMEOUT`，于是 400、鉴权失败、插件内部异常都会触发宿主的整套重试，
+  最后给出一句「检查网络」。现在按 HTTP 状态与失败来源分类（401/403 → 会话失效、
+  429 → 额度耗尽、4xx → 上游错误不可重试、5xx 与连接失败 → 可重试、其余 → 上游错误），
+  只有真正的传输失败才会被建议重试，错误信封里也带上 `x-should-retry`。
+- **深度思考内容永远为空** —— 帧处理层把 `onThinking` 回调漏掉了（shim 侧的
+  `reasoning_content` 分支早就写好了），开启深度思考时只能看到答案、看不到推理过程。
+- **凭据明文进了子进程环境变量** —— DPAPI 调用把整个会话以 base64 塞进
+  `DSH_DOUBAO_DPAPI_BLOB` 交给 PowerShell，存活了 `Add-Type` 编译那 0.5–1 秒；
+  `...process.env` 还把本机所有 API key 一起带了过去。现在改为 stdin 传入、环境变量走
+  白名单，`powershell.exe` 也从 `System32` 绝对路径启动而不是靠 PATH 查找。
+- **一个坏 profile 会让后面所有候选都不再尝试** —— 候选遍历里 `decryptFromProfile` 没有
+  自己的 try/catch，某个目录的 `Local State` 损坏会直接冒到外层，把 D 盘上真正可用的
+  profile 全跳过。现在逐个隔离，失败信息里带上具体目录。
+
+- **一次会话失效要等十二小时才自愈** —— 加密的凭据副本在磁盘上缓存 12 小时，服务端
+  已经判定失效的 session 会被反复读回来，每次请求都以同一种方式失败；用户按提示重新
+  登录，插件仍然拿旧副本，直到 TTL 到期。现在服务端说会话失效就删掉盘上副本，让重新
+  登录立刻生效。顺带挡住时钟回拨：缓存时间在未来（改过系统时间、双系统、主板电池没电）
+  一律视为过期，否则 TTL 永远算不出一个正数。
+- **额度接口不可用时每一轮对话都要多等一次失败** —— 额度是对话前的前置检查，而失败的
+  结果从来不进缓存，于是接口挂掉的每一轮都要再付一次注定失败的往返，正好压在首字节
+  之前。失败结果现在缓存 30 秒：够短，恢复延迟只有一轮；够长，能把这种反复打穿。
+- **设置卡片对本机任何网页敞开** —— 四条路由只校验 Origin 是不是 loopback，而浏览器
+  在**同源**请求里根本不发 Origin 头，于是「没有 Origin」被当成可信 —— 本机另一个端口
+  上的页面（或任何能解析到 127.0.0.1 的页面）都能改掉模型开关和数据目录。现在 Host
+  必须是 loopback（挡住把域名解析到 127.0.0.1 的 DNS rebinding），带
+  `sec-fetch-site: cross-site` 的请求直接拒绝，写请求还必须带一个自定义头 —— 自定义头
+  会触发 CORS 预检，而这几条路由从不应答预检，跨源页面因此发不出这个请求。同源正常
+  使用完全不受影响。
+- **声明了类型声明文件，但那文件从来不存在** —— `package.json` 的 `types` 指向
+  `lib/index.d.ts`，构建却关着 `dts`，任何按类型使用这个包的人都会碰到一个空引用。
+  现在真的生成声明文件（`lib/index.d.ts` 等 5 个），`types` 与 `exports` 两条路径
+  都对得上。同时把 `lib/` 移出版本管理：tsdown 用内容哈希给共享 chunk 命名，每构建
+  一次整批文件就改名，diff 里看不出任何真实改动；发布不受影响（`prepack` 会构建，
+  `files` 从 tarball 里取 `lib`）。
+
+- **额度卡片的「重置时间」是编出来的** —— 这台账号的套餐只返回一个周额度，且窗口的
+  `start_time`/`end_time` 都是 0（服务端不给时间戳）。旧代码于是拿「现在」当窗口起点、
+  加上一个名义周期当重置时刻，卡片显示「6 天后重置」—— 真实重置可能就在二十分钟后。
+  同一份载荷里还带着 `total_amount: "2,100"` / `used_amount: "0"` 这种带千分位的金额，
+  旧代码完全没读，一旦 `used_percent` 缺失就只能显示 0%。现在：窗口还没开始计时就照实
+  说「开始使用后计时」（豆包客户端本身就是这个措辞），有时间戳就显示倒计时，两者都没
+  有才说「重置时间未知」；金额解析后作为百分比的兜底来源。顺带修掉 `doctor` 把「这个
+  套餐没有 5 小时窗口」判成失败的误报 —— 账号形态不是插件故障，只有额度真正读不出来
+  才算失败。
+- **真正在消耗的那份额度没被显示** —— 额度接口返回三个 section，旧代码只读
+  `window_limit_section`。这台账号的「活动赠送额度」（`incentive_quota_section`，
+  已用 782 / 1,600、11 月 21 日 09:46 到期）因此完全不出现在卡片上：用户看到「近 7 天
+  已用 0%」，以为额度一点没动，实际上已经在扣赠送额度了。现在两个 section 一起读，
+  赠送额度单独一行、用「已用 782 / 1,600 · 16d 后到期」这种带金额的写法，排在常规窗口
+  前面。
+
+### 新增
+- **卡片改成看「还剩多少」，并自己走动** —— 进度条过去画的是消耗比例（越用越满），
+  与「还剩多少」的直觉相反；现在画剩余量，用完即为空，颜色阈值也按剩余量给。数字从
+  「已用 782 / 1,600」改成「剩 818 / 1,600」，倒计时由本地时钟每秒从绝对时刻重算 ——
+  既不用每秒请求，也不会因为标签页放久了而漂移。轮询从 5 分钟缩到 30 秒，且只在卡片
+  可见时进行，切回标签页立刻刷一次；轮询走 POST 绕过宿主 5 分钟缓存，否则每 30 秒
+  拿回的都是同一份读数。
+- **卡片重做了一遍视觉** —— 原来五个分区的高度、字号、边框几乎一样，眼睛找不到落点。
+  现在整张卡是一片带极淡高光的表面，分区之间用一条发丝线分隔而不是各自套框；每个额度
+  窗口是一块独立的面板，一行的重点只有一个：右边那个「还剩下多少」。倒计时和「已用
+  X / Y」退到第二行，不再和主数字抢宽度。进度条改成带方向感的渐变并带一点辉光，数字
+  改用等宽字形 —— 每秒跳动的倒计时不会再让整行左右抖。
+
+### 测试
+- `tests/upstream-terminal.test.ts`（12 例）：终止帧、跨 chunk 拆帧、截断判定、思考透传、
+  失败分类与重试矩阵。
+- `tests/shim-lifecycle.test.ts`（5 例）：客户端断开、正常结束后关闭、空闲超时、活动续命、
+  释放后不再触发。
+- `tests/auth-dpapi.test.ts`（4 例）：源码级守住「明文不进 env」「不走 PATH」两条约束。
+- `tests/save-route.test.ts`（+4 例）：缺写入头、非 loopback Host、跨站标记三种拒绝路径，
+  以及「同源 GET 不带 Origin 仍然放行」这条必须保持可用的例外。
+- `tests/quota.test.ts`（8 例）：用真实载荷做固定数据 —— 只有周额度、时间戳为 0、
+  另含「活动赠送额度」组（782 / 1,600、只有到期时间、window_type 3）；覆盖「不伪造
+  重置时刻」「未开始计时标注 startsOnUse」「赠送额度只报到期」「金额推算百分比」
+  「真实时间戳原样透传」五条契约。
+
+## 0.3.1 — 2026-11-02
+
+> 相对 `0.3.0` 的 3 个提交。修「User Data 不在 C 盘就读不到登录信息」，并补上手动指定目录的
+> 入口 —— 之前只能靠环境变量。
+
+### 新增
+
+- **手动指定豆包数据目录** —— 设置卡片新增「豆包数据目录」一段，带「选择目录…」按钮
+  （桌面端弹系统原生文件夹对话框）和「改回自动探测」。装豆包时把数据目录改到 D 盘、
+  或事后手动搬走的人，现在可以自己指路，不用再设环境变量 `DSH_DOUBAO_PROFILE`。
+  段落里会显示当前用的是哪个目录，以及探测到的全部候选（带来源：
+  `manual` / `env` / `appdata` / `process` / `scan`）。
+  - 选中的路径在写入前会校验目录里是否有 `Default\Network\Cookies`，选错当场提示并**拒绝保存**；
+  - 选中的目录后来被删掉或搬走，会自动退回自动探测，不会把凭据加载卡死；
+  - 指到 `User Data` 本身或它的父目录（例如 `D:\Doubao`）都可以，后者会自动往下找一层。
+  - 浏览器形态的宿主没有原生目录对话框，按钮会明确报错而不是静默失败。
+
+### 修复
+
+- **User Data 不在 C 盘就读不到登录信息** —— 凭据查找曾硬编码
+  `%LOCALAPPDATA%\Doubao\User Data`，把数据放到 D 盘（安装器提供这个选项，也有人事后手动搬）
+  的机器会报 `Doubao user profile not found`，而报错里显示的路径恰恰是用户根本没有的那个。
+  现在改为五层回退：卡片里手动选的目录 → 环境变量 `DSH_DOUBAO_PROFILE` → AppData 候选 →
+  运行中客户端的 `--user-data-dir` → 限时扫盘（深度 4、1.5 秒预算、跳过系统目录）。
+  顺序按**代价**而非准确度排：常见情况 4 次 `existsSync` 就命中，不会为 0.8 秒的进程探测
+  拖慢每次冷启动。返回候选**列表**而非单一路径，因为「复制而非移动」会留下空壳 profile —
+  凭据加载逐个尝试，取第一个真正解出可用会话的。
+- **手动指定的目录失效后会永久留空** —— 覆盖值现在每次都会重新校验，失效的选点自动落回
+  自动探测，不再遮蔽真正可用的 profile。
+- **提示文案里的 Windows 路径少了一层反斜杠** —— `Default\Network\Cookies` 写在单引号字符串里
+  会被当成转义序列，浏览器实际看到的是 `DefaultNetworkCookies`，正好是最需要准确的那句话。
+  已补转义，并加了 `scripts/check-locale-literals.mjs` 直接检查构建产物里的字面量
+  （`npm run check` 会自动跑）。
+
+### 测试
+
+- 11 个测试文件、**151 个用例**全绿（0.3.0 是 132 例）。新增覆盖：`profileDir` 的存取与非法
+  类型、`/__save` 对目录存在性的校验（选错目录必须 400 且不写盘）、`/profile` 只读路由
+  （空结果返回 `null` 而不是空字符串）、手动覆盖的优先级与失效回退。
+- `doctor` 五项全绿；`doctor --json` 的 `credentials.data.profile` 会显示来源，
+  现在多一个 `via manual`。
+
+---
+
+## 0.3.0 — 2026-11-02
+
+> 相对 `0.2.0` 的 15 个提交。这一版把插件从「只能纯聊天」推到了「能生图、能续聊、
+> 能让模型通过提示词层模拟去调工具」，并修掉了一个从项目第一天就存在的设置持久化缺陷。
+
+### 新增
+
+- **豆包生图（Seedream 5.0）** —— 模型选择器里新增「豆包 生图（Seedream 5.0）」。
+  生成结果以 Markdown 图片形式追加在回复正文里，可直接预览与保存。
+  实测一次请求返回 3 张 2848×1600 图片（右下角带「豆包 AI生成」水印）。
+  注意 URL 后缀是 `.jpeg` 但字节是 PNG，保存时按内容判格式。
+- **模型清单自动发现** —— 不再硬编码模型名。插件直接读豆包客户端的本地缓存
+  （`menuConfV2`，V8 structured clone 编码），豆包上线新模型时清单会自动跟上。
+  缓存解析失败时自动回退到内置静态清单，`doctor` 会显示当前用的是哪一种。
+  「工作任务」专属模型按名称前缀自动隐藏。
+- **真会话续聊** —— 同一个 DSH 会话的第二轮起只发送增量消息，由豆包服务端维护线程内存，
+  不再每轮重发全部历史。实测第二轮只发 20 个字符，服务端仍能答出上一轮的内容。
+- **深度思考分离** —— 开启深度思考后，思考过程走 `reasoning_content` 而不是混进正文。
+- **实验性工具调用（提示词层模拟）** —— 让豆包能驱动 DSH 的本地工具（读写文件等）。
+  默认**关闭**，设置卡片里有独立开关。实现方式是在提示词里注入工具契约，再把模型输出的
+  ` ```doubao-tool ` 围栏解析回标准 `tool_calls`。实测 5 次调用、坏 JSON 0 次、5/5 轮收敛。
+- **设置卡片新增工具开关段落** —— 与模型清单分开保存，避免「换模型」和「放开文件权限」
+  共用一次确认；关不掉的权限开关是比误开更坏的失败。
+- **手动指定豆包数据目录** —— 设置卡片新增「豆包数据目录」一段，带「选择目录…」按钮
+  （桌面端弹原生文件夹对话框）和「改回自动探测」。装豆包时把数据目录改到 D 盘、或者事后
+  手动搬走的人，现在可以自己指路，不用再设环境变量。选中的路径在写入前会校验
+  `Default\Network\Cookies` 是否存在，选错当场提示且不落盘；已选的目录后来被删掉会自动
+  退回自动探测。段落里会列出当前用着哪个目录、以及探测到的全部候选。
+
+### 修复
+
+- **设置保存失败（从项目第一天就存在）** —— 症状是点开关报
+  `保存失败：host did not persist the value`，或看起来保存成功但刷新后回退。
+  根因不在 schema：本插件的 fiber 在 DSH 0.2.1 上**永远停在 `state 1`（LOADING）**，
+  宿主因此从不给它挂 `runtime.Config`，`describe()` 直接过滤掉命名空间，任何写入都失败于
+  `No configurable plugin entry "dsh-connect-doubao"`。
+  **这意味着历史上这个插件的设置一次都没能落盘过，包括手工改 `cordis.patch.yml` 的那些。**
+  现在两个开关改存插件自己的 `~/.dsh/dsh-connect-doubao.settings.json`，
+  写入是先写临时文件再原子重命名，读取不依赖任何宿主服务在线。
+- **工具契约导致幻觉** —— 温和措辞的契约下，模型会回「已完成修改：…」但**磁盘根本没动**。
+  这是最坏的失败模式：用户以为文件改了。契约已改为硬性规则（第一条回复必须是工具调用、
+  严禁在没有 `[tool result]` 时声称完成），实测从 0/2 提升到 2/2。
+- **多步编辑互相污染** —— 局部替换链会让第 N 次编辑失效于第 N+1 次，最终文件出现重复行。
+  契约加入「每次修改后重新读取文件再决定下一步」后，同一任务 1 次 edit + 1 次 read 收敛。
+- **回复首字丢失** —— 回复开头在 `STREAM_MSG_NOTIFY`、增量在 `STREAM_CHUNK`，
+  旧代码只取一边导致「1+1」变成「+1」。已抽出 `assembleReplyText` 统一拼接。
+- **对话模式根本不通** —— `agent_mode` 常量写反（1/2 互相搞错），每一轮都被路由到
+  豆包的任务 agent，直接回 `710010702`。已按 CDP 抓到的真实请求体整体重写。
+- **User Data 不在 C 盘就读不到登录信息** —— 凭据查找曾硬编码
+  `%LOCALAPPDATA%\Doubao\User Data`，把数据放到 D 盘（安装器提供这个选项，也有人事后手动搬）
+  的机器会报 `Doubao user profile not found`。现在改为五层回退：设置卡片里手动选的目录 →
+  环境变量 `DSH_DOUBAO_PROFILE` → AppData 候选 → 运行中客户端的 `--user-data-dir` → 限时扫盘。
+  顺序按**代价**而非准确度排：常见情况 4 次 `existsSync` 就命中，不会为 0.8 s 的进程探测
+  拖慢每次冷启动。返回的是候选**列表**而非单一路径，因为「复制而非移动」会留下空壳 profile —
+  凭据加载会逐个尝试，取第一个真正能解出可用会话的。
+
+### 改进
+
+- **改动说明改为逐条列出** —— 工具执行完成后不再只说「已修改」，而是按「哪个文件 → 改了什么 →
+  为什么」逐条说明，多处改动分别列出。
+- **请求体形状有测试钉住** —— 18 个断言全部取自 CDP 抓包而非由被测常量反推，
+  防止 `agent_mode` 这类常量再次静默回归。
+
+### 已知限制
+
+- **选不到 2.1 Pro / 2.1 Lite**。服务端**不校验** `model_item_key`（四种真 key 和一个不存在的
+  key 耗时与长度无可测差异），模型由服务端按产品/模式/账号决定。目录已收缩为
+  「快速 / 2.1 Turbo·专家 / 生图」三项，Pro/Lite 只能在豆包客户端自己的「工作任务」里用。
+- **「工作任务 · 本地电脑」调不到**。协议层字段（`runtime_type: 2`、`sandbox_id`、`device_name`）
+  都能发对，但执行者是需要 App 进程内 CUA 运行时的组件，外部客户端一律
+  `710010702`。插件默认走纯对话模式，`DSH_DOUBAO_TASK=1` 才尝试任务模式。
+- **工具模拟只在豆包自身不具备的能力上可靠**。让它「查天气」时它会改用自带联网搜索，
+  不调用我们的工具。
+- **Windows only**。凭据解密依赖 DPAPI。User Data 可以不在 C 盘（见上文五层回退）。
+  浏览器形态的宿主没有原生目录对话框，「选择目录…」会明确报错而不是静默失败，
+  那种环境请用 `DSH_DOUBAO_PROFILE`。
+
+### 测试
+
+- 11 个测试文件、**151 个用例**全绿。本版新增三个文件：`store.test.ts` 20 例（文件合并语义、
+  原子写入、无临时文件残留、`profileDir` 存取与非法类型）、`save-route.test.ts` 20 例
+  （字段白名单、Origin 校验、值形状、500 契约、`profileDir` 的路径存在性校验、`/profile`
+  只读路由）、`profile.test.ts` 25 例（五层探测优先级、去重、扫描深度与时间预算、
+  手动覆盖的优先与失效回退）。
+- `doctor` 五项全绿：凭据 29 cookie / 账号通过 / shim OK / 额度 / 模型发现。
+  `doctor --json` 的 `credentials.data` 现在同时给出 `profile`（用的是哪个、`via env|appdata|
+  process|scan|manual`）与 `candidates`（全部候选），定位"读不到登录信息"时先看这两项。
+
+---
+
+## 0.2.0
+
+- 修复对话模式完全不通（`agent_mode` 常量写反）。
+- 请求体按 CDP 抓包重写。
+
+## 0.1.1 / 0.1.0
+
+- 首个可用版本：凭据复用（DPAPI + AES-GCM）、provider 注册、只读额度卡片。

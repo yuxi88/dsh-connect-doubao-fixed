@@ -1,0 +1,1027 @@
+/**
+ * The Doubao quota + model card, rendered into the host's Plugin
+ * configuration surface.
+ *
+ * SCOPE (deliberately narrow): two quota bars with reset countdowns, the plan
+ * name, the account status line, a refresh button with a 5-minute poll, four
+ * distinct error states, and the model checklist. No account pool, no region
+ * tabs, no credit multipliers, no check-in.
+ *
+ * THE ONE HONESTY REQUIREMENT: Doubao is content-driven. The request body
+ * carries `bot_id`, never a model id — the server picks the model after reading
+ * the prompt (see `../doubao-catalog.ts`). So the checklist does NOT choose a
+ * model. Ticking an entry decides whether that ENTRY appears in DSH's model
+ * picker. Every label in the model block says so, because a checklist that
+ * looked like model selection would be a lie the user acts on.
+ *
+ * SECURITY: this component renders only the allow-listed fields of
+ * `DoubaoQuotaView` / `DoubaoCatalogView`. It never reads, stores or displays a
+ * cookie, token or account id, and it never reads a setting other than the
+ * ticked model ids.
+ *
+ * @module dsh-connect-doubao-plus/client-card
+ */
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { ReactElement } from 'react'
+import {
+  DOUBAO_CATALOG_PATH,
+  DOUBAO_ENABLED_MODELS_FIELD,
+  DOUBAO_QUOTA_PATH,
+  DOUBAO_SAVE_PATH,
+  DOUBAO_AUTH_PATH,
+  DOUBAO_STATS_PATH,
+  classifyQuotaView,
+  clampPercent,
+  enabledModelIdsOf,
+  DOUBAO_TOOL_EMULATION_FIELD,
+  toolEmulationOf,
+  formatCountdown,
+  formatCompactTokens,
+} from './contract.ts'
+import type {
+  DoubaoAccountState,
+  DoubaoAuthView,
+  DoubaoCatalogView,
+  DoubaoModelEntry,
+  DoubaoQuotaView,
+  DoubaoStatsView,
+} from './contract.ts'
+import type { DoubaoCardKey, Translate } from './locales.ts'
+import { DOUBAO_CARD_CSS } from './styles.ts'
+import { setDoubaoCatalogSnapshot } from './DoubaoCatalogStore.ts'
+
+/**
+ * How often the quota is re-read while the card is on screen.
+ *
+ * The point of the card is "how much is left", and that number changes as the
+ * user works — a five-minute-old "782" is indistinguishable from a frozen
+ * panel. Thirty seconds costs one small summary call and only runs while the
+ * tab is visible.
+ */
+const POLL_INTERVAL_MS = 30 * 1000
+
+/** How often the local clock ticks, so countdowns move without any request. */
+const TICK_MS = 1000
+
+/**
+ * Props the slot delivers.
+ *
+ * Both members are OPTIONAL on purpose and the card is written to work with
+ * neither: `t` falls back to the key, and with no `settingsScope` the model
+ * block renders read-only. A host line that provides only one of the two seats
+ * must still get a working card rather than a blank slot.
+ */
+export interface DoubaoCardInjected {
+  t: Translate
+  settingsScope?: {
+    getSnapshot(): { status: string; value?: unknown; writable: boolean }
+    subscribe(listener: () => void): () => void
+    /** Whether the Host accepted the write; `void` on older lines. */
+    set(field: string, value: unknown): Promise<boolean | void>
+  }
+}
+
+/** Props as received from the Plugin configuration slot. */
+export type DoubaoCardProps = Partial<DoubaoCardInjected> & { view?: string }
+
+type T = (key: DoubaoCardKey, vars?: Record<string, string | number>) => string
+
+/**
+ * Fallback translator: renders the key itself.
+ *
+ * Better than throwing. If the locale registration failed, the card still shows
+ * its structure (bars, state dot, controls) with visible key names, which is
+ * diagnosable — a thrown render would blank the slot and hide the failure.
+ */
+const fallbackT: T = key => key
+
+/** Inject the stylesheet once per document. */
+function useCardStyles(): void {
+  useEffect(() => {
+    if (typeof document === 'undefined') return
+    const id = 'dbq-card-styles'
+    if (document.getElementById(id) !== null) return
+    const el = document.createElement('style')
+    el.id = id
+    el.textContent = DOUBAO_CARD_CSS
+    document.head?.appendChild(el)
+  }, [])
+}
+
+/**
+ * Header every write carries.
+ *
+ * Not a secret: it makes the request non-simple, so a hostile page cannot send
+ * it without a CORS preflight — which these routes never approve. Without it the
+ * host rejects the write, which is exactly what should happen to a cross-site
+ * request that has no business flipping settings.
+ */
+const WRITE_HEADERS = { 'x-dsh-doubao-write': '1' } as const
+
+/**
+ * GET the quota view. Never throws: every failure becomes `undefined`, which
+ * classifies as `unreadable` rather than unmounting the card.
+ */
+async function fetchQuota(signal: AbortSignal): Promise<DoubaoQuotaView | undefined> {
+  const response = await fetch(DOUBAO_QUOTA_PATH, {
+    method: 'GET',
+    credentials: 'same-origin',
+    signal,
+    headers: { accept: 'application/json' },
+  })
+  if (!response.ok) return undefined
+  return (await response.json()) as DoubaoQuotaView
+}
+
+/** POST forces a host-side cache bypass. Same error contract as {@link fetchQuota}. */
+async function refreshQuota(signal?: AbortSignal): Promise<DoubaoQuotaView | undefined> {
+  const response = await fetch(DOUBAO_QUOTA_PATH, {
+    method: 'POST',
+    credentials: 'same-origin',
+    ...(signal === undefined ? {} : { signal }),
+    headers: { accept: 'application/json', ...WRITE_HEADERS },
+  })
+  if (!response.ok) return undefined
+  return (await response.json()) as DoubaoQuotaView
+}
+
+/**
+ * Read the catalog for the checklist. Never throws.
+ *
+ * POST, not GET: the host drops its discovery memo on a write request, so the
+ * list is re-read from the client's own caches instead of answered from a
+ * memo up to ten minutes old. The refresh button therefore has to POST — a GET
+ * would faithfully re-render a catalog it never re-read.
+ */
+async function fetchCatalog(signal: AbortSignal): Promise<DoubaoCatalogView | undefined> {
+  const response = await fetch(DOUBAO_CATALOG_PATH, {
+    method: 'POST',
+    credentials: 'same-origin',
+    signal,
+    headers: { accept: 'application/json', ...WRITE_HEADERS },
+  })
+  if (!response.ok) return undefined
+  return (await response.json()) as DoubaoCatalogView
+}
+
+/** Read runtime session & token statistics. Never throws. */
+async function fetchStats(signal?: AbortSignal): Promise<DoubaoStatsView | undefined> {
+  const response = await fetch(DOUBAO_STATS_PATH, {
+    method: 'GET',
+    credentials: 'same-origin',
+    ...(signal === undefined ? {} : { signal }),
+    headers: { accept: 'application/json' },
+  })
+  if (!response.ok) return undefined
+  return (await response.json()) as DoubaoStatsView
+}
+
+/** Reset runtime session & token statistics on the host. */
+async function resetStatsRequest(): Promise<DoubaoStatsView | undefined> {
+  const response = await fetch(DOUBAO_STATS_PATH, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json', accept: 'application/json', ...WRITE_HEADERS },
+    body: JSON.stringify({ action: 'reset' }),
+  })
+  if (!response.ok) return undefined
+  return (await response.json()) as DoubaoStatsView
+}
+
+function formatLatencyMs(ms: number | null): string {
+  if (ms === null || !Number.isFinite(ms)) return '--'
+  if (ms >= 1000) return `${(ms / 1000).toFixed(2)}s`
+  return `${Math.round(ms)}ms`
+}
+
+function formatRatePercent(rate: number | null): string {
+  if (rate === null || !Number.isFinite(rate)) return '--'
+  return `${Math.round(rate * 100)}%`
+}
+
+/**
+ * The trailing half of a bar's meta line: when the instant is known, when it
+ * is not, or why it is not.
+ *
+ * "Not started yet" is not the same statement as "unknown": Doubao opens a
+ * weekly window on first use, and saying 「开始使用后计时」 is the truth the app
+ * itself shows, while 「重置时间未知」 would read as a server problem.
+ */
+function instantLabel(t: T, resetsInMs: number | null | undefined, kind: 'reset' | 'expire'): string {
+  if (resetsInMs !== null && resetsInMs !== undefined) {
+    return kind === 'expire'
+      ? t('quota.expiresIn', { time: formatCountdown(resetsInMs) })
+      : t('quota.resetsIn', { time: formatCountdown(resetsInMs) })
+  }
+  return t('quota.resetUnknown')
+}
+
+/** One quota bar: label, used percent, bar, reset countdown. */
+function QuotaBar(props: {
+  label: string
+  usedPercent: number | undefined
+  /** Absolute instant, so the countdown ticks client-side without a request. */
+  resetsAt: number | null | undefined
+  /** Null when Doubao sent no window timestamps: the instant is unknown. */
+  resetsInMs: number | null | undefined
+  /** True when the window only starts counting on first use. */
+  startsOnUse?: boolean | undefined
+  /** Amounts, when the plan reports them: 「已用 782 / 1,600」 reads better than 48%. */
+  usedAmount?: number | null | undefined
+  totalAmount?: number | null | undefined
+  /** What the instant means: a rolling reset, or a grant expiring. */
+  instantKind?: 'reset' | 'expire'
+  t: T
+  now: number
+}): ReactElement {
+  const { label, usedPercent, resetsAt, resetsInMs, startsOnUse, usedAmount, totalAmount, instantKind, t, now } = props
+  if (usedPercent === undefined) {
+    return (
+      <div className="dbq-row">
+        <div className="dbq-row-head">
+          <span className="dbq-label">{label}</span>
+          <span className="dbq-meta">{t('quota.windowMissing')}</span>
+        </div>
+      </div>
+    )
+  }
+  const used = clampPercent(usedPercent)
+  // The gauge answers "how much is left", so it fills with what remains and the
+  // numbers beside it say the same thing: a bar that fills as it empties is a
+  // reading error waiting to happen.
+  const percent = clampPercent(100 - used)
+  const instantMs =
+    resetsAt !== null && resetsAt !== undefined && resetsAt > 0 ? Math.max(0, resetsAt - now) : null
+  const liveMs = instantMs ?? resetsInMs
+  const remainingAmount =
+    totalAmount !== null && totalAmount !== undefined && totalAmount > 0
+      ? Math.max(0, totalAmount - (usedAmount ?? 0))
+      : null
+  // Keyed on what is LEFT: nearly empty is the warning state now that the bar
+  // measures remaining, not consumed.
+  const tone = percent <= 0 ? ' dbq-full' : percent <= 20 ? ' dbq-warn' : ''
+  // The countdown is recomputed from the host's absolute reset instant rather
+  // than by decrementing the host's remaining ms, so a stale payload cannot
+  // drift: a tab left open for an hour still shows the true remaining time.
+  return (
+    <div className="dbq-row">
+      <div className="dbq-row-head">
+        <span className="dbq-label">{label}</span>
+        {/* One loud number per row — what is LEFT — instead of a line that
+            carried the figure, the percentage and the countdown at once. */}
+        <span className="dbq-figure">
+          {remainingAmount !== null
+            ? t('quota.remainingAmount', {
+                remaining: remainingAmount,
+                total: totalAmount ?? 0,
+              })
+            : t('quota.remainingPercent', { percent })}
+        </span>
+      </div>
+      <div
+        className="dbq-bar"
+        role="progressbar"
+        aria-valuenow={percent}
+        aria-valuetext={t('quota.remainingPercent', { percent })}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-label={label}
+      >
+        <div className={`dbq-fill${tone}`} style={{ width: `${percent}%` }} />
+      </div>
+      <div className="dbq-row-foot">
+        <span className="dbq-meta">
+          {startsOnUse === true && (liveMs === null || liveMs === undefined)
+            ? t('quota.startsOnUse')
+            : instantLabel(t, liveMs, instantKind === 'expire' ? 'expire' : 'reset')}
+        </span>
+        {remainingAmount !== null && (
+          <span className="dbq-figure-sub">{t('quota.usedAmounts', { used: usedAmount ?? used, total: totalAmount ?? 0 })}</span>
+        )}
+      </div>
+      <span className="dbq-meta" hidden>{`now=${now}`}</span>
+    </div>
+  )
+}
+
+/** Tier number → its label. Doubao's `need_deep_think` is 0 / 1 / 3. */
+function tierLabel(tier: number, t: T): string | undefined {
+  if (tier === 0) return t('models.tierFast')
+  if (tier === 1) return t('models.tierThink')
+  if (tier === 3) return t('models.tierExpert')
+  return undefined
+}
+
+export function DoubaoQuotaCard(props: DoubaoCardProps): ReactElement {
+  const t = (props.t ?? fallbackT) as T
+  const scope = props.settingsScope
+  useCardStyles()
+
+  const [quota, setQuota] = useState<DoubaoQuotaView | undefined>(undefined)
+  const [busy, setBusy] = useState(false)
+  const [stats, setStats] = useState<DoubaoStatsView | undefined>(undefined)
+  const [statsBusy, setStatsBusy] = useState(false)
+  const [catalog, setCatalog] = useState<DoubaoCatalogView | undefined>(undefined)
+  const [catalogBusy, setCatalogBusy] = useState(false)
+  /** Ticking `settingsScope` bumps this so the model block re-reads the snapshot. */
+  const [settingsRevision, setSettingsRevision] = useState(0)
+  /** Only set once the settings write has been read back and confirmed. */
+  const [saved, setSaved] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
+
+  /**
+   * The settings snapshot, used ONLY as a fallback.
+   *
+   * The authoritative copy is now the plugin's own file, read through
+   * `DOUBAO_SAVE_PATH` below: this plugin's fiber never reaches ACTIVE on DSH
+   * 0.2.1, so the host neither lists nor writes its namespace (`No configurable
+   * plugin entry`). A snapshot that cannot see a save is worse than no
+   * snapshot, hence the file wins when both are available.
+   */
+  const scopedValue = useMemo(() => {
+    if (scope === undefined) return undefined
+    try {
+      return scope.getSnapshot().value
+    } catch {
+      return undefined
+    }
+  }, [scope, settingsRevision])
+
+  /** Settings as persisted by the plugin itself. `undefined` = not read yet. */
+  const [stored, setStored] = useState<unknown>(undefined)
+  const [storeError, setStoreError] = useState<string | null>(null)
+
+  const loadSettings = useCallback(async (): Promise<void> => {
+    try {
+      const response = await fetch(DOUBAO_SAVE_PATH, { method: 'GET' })
+      if (!response.ok) throw new Error(`HTTP ${String(response.status)}`)
+      const body = await response.json() as { value?: unknown }
+      setStored(body.value)
+      setStoreError(null)
+    } catch (error: unknown) {
+      // Falling back rather than failing: an older host without this route
+      // still renders, at the cost of not seeing filesystem-persisted values.
+      setStoreError((error as Error)?.message ?? 'unknown error')
+      setStored(scope === undefined ? undefined : scopedValue)
+    }
+  }, [scope, scopedValue])
+
+  useEffect(() => { void loadSettings() }, [loadSettings])
+
+  const configured = stored ?? scopedValue
+
+  /**
+   * Writes go through the plugin's own endpoint, so they do NOT depend on the
+   * host's `writable` flag — that flag is exactly what was false here.
+   */
+  const canWrite = stored !== undefined || storeError === null
+
+  // Re-read whenever the host announces a settings change.
+  useEffect(() => {
+    if (scope === undefined) return
+    return scope.subscribe(() => setSettingsRevision(value => value + 1))
+  }, [scope])
+
+  // ---- a local clock: countdowns tick every second, zero requests ----
+  //
+  // The host sends absolute instants, so "time until reset/expiry" is pure
+  // subtraction. Refreshing once a second to animate a countdown would be both
+  // slower and rude to the endpoint.
+  const [now, setNow] = useState<number>(() => Date.now())
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), TICK_MS)
+    return () => clearInterval(timer)
+  }, [])
+
+  // ---- quota: initial read, then a live poll while visible ------------
+  useEffect(() => {
+    let alive = true
+    const controller = new AbortController()
+    const hidden = (): boolean =>
+      typeof document !== 'undefined' && document.visibilityState === 'hidden'
+    // The first read may come from the host's five-minute memo (GET); every
+    // later read forces a fresh one (POST), because a 30-second poll answered
+    // from the memo would never show a change.
+    const load = async (force: boolean): Promise<void> => {
+      const [quotaView, statsView] = await Promise.all([
+        (force ? refreshQuota(controller.signal) : fetchQuota(controller.signal)).catch(() => undefined),
+        fetchStats(controller.signal).catch(() => undefined),
+      ])
+      if (!alive) return
+      setQuota(quotaView)
+      if (statsView !== undefined) setStats(statsView)
+    }
+    void load(false)
+    const timer = setInterval(() => {
+      if (!hidden()) void load(true)
+    }, POLL_INTERVAL_MS)
+    // Returning to the tab is exactly when the number is most likely stale.
+    const onVisible = (): void => {
+      if (!hidden()) void load(true)
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      alive = false
+      controller.abort()
+      clearInterval(timer)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [])
+
+  // ---- manual refresh ---------------------------------------------------
+  const onRefresh = useCallback(async (): Promise<void> => {
+    setBusy(true)
+    try {
+      const [quotaView, statsView] = await Promise.all([
+        refreshQuota().catch(() => undefined),
+        fetchStats().catch(() => undefined),
+      ])
+      setQuota(quotaView)
+      if (statsView !== undefined) setStats(statsView)
+    } finally {
+      setBusy(false)
+    }
+  }, [])
+
+  const onRefreshStats = useCallback(async (): Promise<void> => {
+    setStatsBusy(true)
+    try {
+      const next = await fetchStats()
+      if (next !== undefined) setStats(next)
+    } catch {
+      /* ignore transient read failures */
+    } finally {
+      setStatsBusy(false)
+    }
+  }, [])
+
+  const onResetStats = useCallback(async (): Promise<void> => {
+    setStatsBusy(true)
+    try {
+      const next = await resetStatsRequest()
+      if (next !== undefined) setStats(next)
+    } catch {
+      /* ignore transient write failures */
+    } finally {
+      setStatsBusy(false)
+    }
+  }, [])
+
+  // ---- catalog (the checklist's source) --------------------------------
+  const loadCatalog = useCallback(async (): Promise<void> => {
+    setCatalogBusy(true)
+    try {
+      const nextCatalog = await fetchCatalog(new AbortController().signal)
+      setCatalog(nextCatalog)
+      setDoubaoCatalogSnapshot(nextCatalog)
+    } catch {
+      setCatalog(undefined)
+    } finally {
+      setCatalogBusy(false)
+    }
+  }, [])
+
+  useEffect(() => { void loadCatalog() }, [loadCatalog])
+
+  /**
+   * The draft: which entries are ticked.
+   *
+   * `undefined` means "no draft yet" — the card derives one from the catalog
+   * (ticking everything, so a first-time user sees a usable picker) rather than
+   * rendering an empty list that reads as a failure.
+   */
+  const [draft, setDraft] = useState<Set<string> | undefined>(undefined)
+
+  useEffect(() => {
+    const models = catalog?.models
+    if (models === undefined || models.length === 0) {
+      setDraft(undefined)
+      return
+    }
+    const savedIds = enabledModelIdsOf(configured)
+    setDraft(new Set(savedIds ?? models.map(model => model.id)))
+  }, [catalog, configured])
+
+  const models: readonly DoubaoModelEntry[] = catalog?.models ?? []
+  const enabledCount = draft === undefined ? 0 : draft.size
+
+  /**
+   * Whether the draft differs from what is saved.
+   *
+   * Compared as SETS of ids, so reordering the catalog never marks the card
+   * dirty, and a saved value that the current catalog does not contain does not
+   * either. Only ids present in the catalog can be toggled, so an id that has
+   * since disappeared upstream is simply ignored.
+   */
+  const dirty = useMemo(() => {
+    if (draft === undefined) return false
+    const savedIds = enabledModelIdsOf(configured)
+    const base = new Set(savedIds ?? models.map(model => model.id))
+    if (base.size !== draft.size) return true
+    for (const id of base) if (!draft.has(id)) return true
+    return false
+  }, [draft, configured, models])
+
+  const toggle = useCallback((id: string): void => {
+    setDraft(current => {
+      const next = new Set(current ?? [])
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+    setSaved(false)
+    setSaveError(null)
+  }, [])
+
+  const selectAll = useCallback((): void => {
+    setDraft(new Set(models.map(model => model.id)))
+    setSaved(false)
+    setSaveError(null)
+  }, [models])
+
+  const selectNone = useCallback((): void => {
+    setDraft(new Set())
+    setSaved(false)
+    setSaveError(null)
+  }, [])
+
+  /**
+   * Persist one settings field through the plugin's OWN endpoint.
+   *
+   * Neither `scope.set()` NOR `settings.mutate` can persist this plugin: its
+   * fiber never reaches ACTIVE on DSH 0.2.1, so the host reports
+   * `No configurable plugin entry "dsh-connect-doubao-plus"` and drops every write.
+   * The endpoint writes a JSON file the plugin owns (write-temp-then-rename),
+   * and returns the value it now reads back — so a successful response is
+   * proof of persistence, not a claim.
+   */
+  const persistField = useCallback(async (field: string, value: unknown): Promise<unknown> => {
+    let response: Response
+    try {
+      response = await fetch(DOUBAO_SAVE_PATH, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...WRITE_HEADERS },
+        body: JSON.stringify({ field, value }),
+      })
+    } catch (error: unknown) {
+      throw new Error(`host save endpoint unreachable: ${(error as Error)?.message ?? String(error)}`)
+    }
+    const detail = await response.json().catch(() => ({ error: `HTTP ${String(response.status)}` })) as {
+      ok?: unknown
+      value?: unknown
+      errorName?: unknown
+      error?: unknown
+    }
+    if (!response.ok || detail.ok !== true) {
+      const reason = `${String(detail.errorName ?? '')} ${String(detail.error ?? '')}`.trim()
+      throw new Error(reason === '' ? `HTTP ${String(response.status)}` : reason)
+    }
+    // The endpoint returns the file's state AFTER the write, so the card can
+    // render the committed value without a second round trip.
+    setStored(detail.value)
+    setStoreError(null)
+    return detail.value
+  }, [])
+
+  /**
+   * Save the draft, then READ IT BACK.
+   *
+   * The endpoint reporting `ok` is the commit; the read-back only confirms the
+   * page's own snapshot caught up. Here it matters more than usual because a
+   * save discards the draft — so a snapshot that never refreshes is reported
+   * rather than silently losing the user's edits.
+   */
+  const onSave = useCallback(async (): Promise<void> => {
+    if (draft === undefined) return
+    setBusy(true)
+    setSaveError(null)
+    const ids = [...draft]
+    try {
+      // `persistField` resolves with the file state AFTER the write, so it is
+      // already the read-back. The old loop that polled the host snapshot is
+      // gone: it was polling a channel this plugin does not appear in, so it
+      // could only ever time out (which is what produced the false "save
+      // failed" this whole rewrite exists to remove).
+      const committed = enabledModelIdsOf(await persistField(DOUBAO_ENABLED_MODELS_FIELD, ids))
+      const landed = committed !== undefined && committed.length === ids.length &&
+        ids.every(id => committed?.includes(id))
+      if (!landed) {
+        setSaveError(t('models.saveFailed', { reason: '已写入磁盘，但回读的值与提交的不一致' }))
+        return
+      }
+      setSaved(true)
+    } catch (error: unknown) {
+      setSaveError(t('models.saveFailed', { reason: (error as Error)?.message ?? 'unknown error' }))
+    } finally {
+      setBusy(false)
+    }
+  }, [persistField, draft, t])
+
+  /**
+   * The tool-emulation switch.
+   *
+   * Written immediately (no Save button) because it is a single independent
+   * toggle: bundling it into the checklist's draft would make a model-selection
+   * edit and a privilege change share one commit, and the user cannot tell which
+   * one they are confirming.
+   *
+   * Read back for the same reason the checklist is: the host's write can resolve
+   * while the value never lands (see `onSave`), and silently failing to turn OFF
+   * a capability that lets a model touch files is the worse error.
+   */
+  const toolsOn = toolEmulationOf(configured)
+  const [toolsError, setToolsError] = useState<string | null>(null)
+  const onToggleTools = useCallback(async (next: boolean): Promise<void> => {
+    setToolsError(null)
+    try {
+      // Same as `onSave`: the returned value IS the read-back, so no polling of
+      // a snapshot that cannot see this plugin's storage.
+      const committed = toolEmulationOf(await persistField(DOUBAO_TOOL_EMULATION_FIELD, next))
+      if (committed !== next) {
+        setToolsError(t('models.saveFailed', { reason: '已写入磁盘，但回读的值与提交的不一致' }))
+      }
+    } catch (error: unknown) {
+      setToolsError(t('models.saveFailed', { reason: (error as Error)?.message ?? 'unknown error' }))
+    }
+  }, [persistField, t])
+
+  // ---- session ----------------------------------------------------------
+  /**
+   * The session, read from its own route.
+   *
+   * Deliberately NOT taken from the settings snapshot: what is signed in is not
+   * a setting. The route reads the sealed session itself, so it is the only
+   * honest source for "signed in / expires in N days".
+   */
+  const [auth, setAuth] = useState<DoubaoAuthView | undefined>(undefined)
+  const [authBusy, setAuthBusy] = useState(false)
+  const [authError, setAuthError] = useState<string | null>(null)
+
+  const loadAuth = useCallback(async (): Promise<void> => {
+    try {
+      const response = await fetch(DOUBAO_AUTH_PATH, {
+        method: 'GET',
+        headers: { accept: 'application/json' },
+      })
+      if (!response.ok) throw new Error(`HTTP ${String(response.status)}`)
+      setAuth(await response.json() as DoubaoAuthView)
+    } catch (error: unknown) {
+      setAuthError((error as Error)?.message ?? 'unknown error')
+    }
+  }, [])
+
+  useEffect(() => { void loadAuth() }, [loadAuth])
+
+  const postAuth = useCallback(async (): Promise<DoubaoAuthView> => {
+    const response = await fetch(DOUBAO_AUTH_PATH, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...WRITE_HEADERS },
+      // The route accepts exactly this one body; anything else is a 400.
+      body: JSON.stringify({ action: 'login' }),
+    })
+    const detail = await response.json().catch(
+      () => ({ error: `HTTP ${String(response.status)}` }),
+    ) as DoubaoAuthView & { error?: unknown }
+    if (!response.ok || detail.ok !== true) {
+      throw new Error(String(detail.error ?? `HTTP ${String(response.status)}`))
+    }
+    setAuth(detail)
+    return detail
+  }, [])
+
+  /**
+   * Start a fresh browser sign-in.
+   *
+   * The route holds this request open for the whole scan, so the button has to
+   * survive a multi-minute wait — `authBusy` is what keeps the user from firing
+   * three overlapping browser windows.
+   */
+  const relogin = useCallback(async (): Promise<void> => {
+    setAuthError(null)
+    setAuthBusy(true)
+    try {
+      const view = await postAuth()
+      if (!view.signedIn) {
+        setAuthError(t('auth.loginFailed', { reason: view.detail ?? 'unknown error' }))
+      } else {
+        void onRefresh()
+      }
+    } catch (error: unknown) {
+      setAuthError(t('auth.loginFailed', { reason: (error as Error)?.message ?? 'unknown error' }))
+    } finally {
+      setAuthBusy(false)
+    }
+  }, [postAuth, onRefresh, t])
+
+  // ---- render -----------------------------------------------------------
+  const state: DoubaoAccountState = classifyQuotaView(quota)
+  const stateText = t(`account.${state}`)
+  const stateTone = state === 'ok' ? '' : state === 'exhausted' || state === 'network' ? ' dbq-bad' : ' dbq-warn'
+
+  return (
+    <div className="dbq-card">
+      <div className="dbq-head">
+        <span className="dbq-title">{t('card.title')}</span>
+        <span className="dbq-sub">{t('card.subtitle')}</span>
+      </div>
+
+      {/* ---- quota ---- */}
+      <div className="dbq-section">
+        <div className="dbq-section-title">
+          <span>{t('quota.plan')}</span>
+          <span className="dbq-count">{quota?.plan ?? '—'}</span>
+        </div>
+        {(quota?.windows.incentive ?? []).map((window, index) => (
+          <QuotaBar
+            key={`incentive-${index}`}
+            label={window.label ?? t('quota.incentive')}
+            usedPercent={window.usedPercent}
+            resetsInMs={window.resetsInMs}
+            resetsAt={window.resetsAt}
+            usedAmount={window.usedAmount}
+            totalAmount={window.totalAmount}
+            instantKind="expire"
+            t={t}
+            now={now}
+          />
+        ))}
+        <QuotaBar
+          label={t('quota.fiveHour')}
+          usedPercent={quota?.windows.fiveHour?.usedPercent}
+          resetsInMs={quota?.windows.fiveHour?.resetsInMs}
+          resetsAt={quota?.windows.fiveHour?.resetsAt}
+          startsOnUse={quota?.windows.fiveHour?.startsOnUse}
+          usedAmount={quota?.windows.fiveHour?.usedAmount}
+          totalAmount={quota?.windows.fiveHour?.totalAmount}
+          t={t}
+          now={now}
+        />
+        <QuotaBar
+          label={t('quota.weekly')}
+          usedPercent={quota?.windows.weekly?.usedPercent}
+          resetsInMs={quota?.windows.weekly?.resetsInMs}
+          resetsAt={quota?.windows.weekly?.resetsAt}
+          startsOnUse={quota?.windows.weekly?.startsOnUse}
+          usedAmount={quota?.windows.weekly?.usedAmount}
+          totalAmount={quota?.windows.weekly?.totalAmount}
+          t={t}
+          now={now}
+        />
+        <div className="dbq-actions">
+          <button type="button" className="dbq-btn" onClick={() => void onRefresh()} disabled={busy}>
+            {busy ? t('quota.refreshing') : t('quota.refresh')}
+          </button>
+          <span className="dbq-note">{t('quota.autoNote')}</span>
+        </div>
+      </div>
+
+      {/* ---- session stats & token usage ------------------------ */}
+      <div className="dbq-section">
+        <div className="dbq-section-title">
+          <span>{t('stats.title')}</span>
+          <span className="dbq-count">
+            {stats === undefined
+              ? '—'
+              : t('stats.sessionsActive', { count: stats.activeConversations })}
+          </span>
+        </div>
+        {stats === undefined || stats.totals.requests === 0 ? (
+          <div className="dbq-note">{stats === undefined ? t('stats.loadFailed') : t('stats.empty')}</div>
+        ) : (
+          <>
+            <div className="dbq-row">
+              <div className="dbq-row-head">
+                <span className="dbq-label">{t('stats.requestsLabel')}</span>
+                <span className="dbq-figure">
+                  {t('stats.requestsValue', {
+                    succeeded: stats.totals.succeeded,
+                    continuations: stats.totals.continuations,
+                    failed: stats.totals.failed,
+                  })}
+                </span>
+              </div>
+            </div>
+            <div className="dbq-row">
+              <div className="dbq-row-head">
+                <span className="dbq-label">{t('stats.totalTokensLabel')}</span>
+                <span className="dbq-figure">
+                  {t('stats.totalTokensValue', {
+                    total: formatCompactTokens(stats.totals.totalTokens),
+                    input: formatCompactTokens(stats.totals.promptTokens),
+                    output: formatCompactTokens(stats.totals.completionTokens),
+                  })}
+                </span>
+              </div>
+              <div className="dbq-row-foot">
+                <span className="dbq-meta">
+                  {t('stats.tokenBreakdown', {
+                    uncached: formatCompactTokens(stats.totals.uncachedInputTokens),
+                    cached: formatCompactTokens(stats.totals.cachedInputTokens),
+                    reasoning: formatCompactTokens(stats.totals.reasoningTokens),
+                  })}
+                </span>
+                <span className="dbq-figure-sub">
+                  {t('stats.cacheHitRate', { rate: formatRatePercent(stats.totals.cacheHitRate) })}
+                </span>
+              </div>
+            </div>
+            <div className="dbq-row">
+              <div className="dbq-row-head">
+                <span className="dbq-label">{t('stats.latencyLabel')}</span>
+                <span className="dbq-figure">
+                  {t('stats.latencyValue', {
+                    ttft: formatLatencyMs(stats.totals.avgTtftMs),
+                    tps: stats.totals.avgTps === null ? '--' : String(stats.totals.avgTps),
+                  })}
+                </span>
+              </div>
+            </div>
+            {stats.lastTurn?.upstreamContextWindow != null && (
+              <div className="dbq-row">
+                <div className="dbq-row-head">
+                  <span className="dbq-label">{t('stats.upstreamWindowLabel')}</span>
+                  <span className="dbq-meta">
+                    {t('stats.upstreamWindowValue', {
+                      used: formatCompactTokens(stats.lastTurn.upstreamContextWindow.totalUsed),
+                      window: formatCompactTokens(stats.lastTurn.upstreamContextWindow.totalWindowSize),
+                      system: formatCompactTokens(stats.lastTurn.upstreamContextWindow.systemPrompt),
+                      messages: formatCompactTokens(stats.lastTurn.upstreamContextWindow.messages),
+                      tools: formatCompactTokens(stats.lastTurn.upstreamContextWindow.tools),
+                    })}
+                  </span>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+        <div className="dbq-actions">
+          <button type="button" className="dbq-btn" onClick={() => void onRefreshStats()} disabled={statsBusy}>
+            {statsBusy ? t('stats.refreshing') : t('stats.refresh')}
+          </button>
+          <button
+            type="button"
+            className="dbq-btn"
+            onClick={() => void onResetStats()}
+            disabled={statsBusy || (stats?.totals.requests ?? 0) === 0}
+          >
+            {t('stats.reset')}
+          </button>
+          <span className="dbq-note">{t('stats.note')}</span>
+        </div>
+      </div>
+
+      {/* ---- account status ---- */}
+      <div className="dbq-section">
+        <div className="dbq-section-title"><span>{t('account.title')}</span></div>
+        <div className="dbq-state">
+          <span className={`dbq-dot${stateTone}`} />
+          <span className="dbq-state-text">{stateText}</span>
+        </div>
+        {quota?.profile !== undefined && (
+          <div className="dbq-profile">{t('account.profile')}: {quota.profile}</div>
+        )}
+      </div>
+
+      {/* ---- session --------------------------------------------- */}
+      <div className="dbq-section">
+        <div className="dbq-section-title">
+          <span>{t('auth.title')}</span>
+          <span className="dbq-count">
+            {auth === undefined
+              ? '—'
+              : auth.signedIn ? t('auth.signedIn') : t('auth.signedOut')}
+          </span>
+        </div>
+        {auth?.signedIn === true && (
+          <div className="dbq-note">
+            {auth.expiresAt === null
+              ? t('auth.expiryUnknown')
+              : t('auth.expires', { days: auth.daysLeft ?? 0 })}
+          </div>
+        )}
+        {auth?.signedIn === false && auth.detail !== null && (
+          <div className="dbq-note dbq-warn">{auth.detail}</div>
+        )}
+        <div className="dbq-actions">
+          <button
+            type="button"
+            className="dbq-btn dbq-primary"
+            onClick={() => void relogin()}
+            disabled={!canWrite || authBusy || auth === undefined}
+          >
+            {authBusy ? t('auth.relogining') : t('auth.relogin')}
+          </button>
+        </div>
+        {authError !== null && <span className="dbq-error">{authError}</span>}
+      </div>
+
+      {/* ---- model checklist ---- */}
+      <div className="dbq-section">
+        <div className="dbq-section-title">
+          <span>{t('models.title')}</span>
+          <span className="dbq-count">{t('models.enabledCount', { count: enabledCount })}</span>
+        </div>
+        {/* The honesty line. Without it the checklist reads as model selection,
+            which the upstream does not honour. */}
+        <div className="dbq-note">{t('models.routingNote')}</div>
+
+        {/* Read-only is now about the plugin's own store, not the host scope:
+            the scope is present but useless here (it cannot see this plugin). */}
+        {!canWrite && <div className="dbq-note">{t('models.readOnly')}</div>}
+        {catalog === undefined && <div className="dbq-note">{t('models.loadFailed')}</div>}
+        {catalog?.ok === true && models.length === 0 && <div className="dbq-note">{t('models.empty')}</div>}
+        {/* Only worth saying when a multiplier is actually on screen: the claim is
+            the client's, and a user who acts on it needs to know who made it. */}
+        {models.some(model => model.rate !== null) && (
+          <div className="dbq-note">{t('models.rateNote')}</div>
+        )}
+
+        <div className="dbq-models">
+          {models.map(model => (
+            <label key={model.id} className="dbq-model">
+              <input
+                type="checkbox"
+                checked={draft?.has(model.id) ?? false}
+                disabled={!canWrite || draft === undefined}
+                onChange={() => toggle(model.id)}
+              />
+              <span className="dbq-model-main">
+                <span className="dbq-model-name">
+                  <span>{model.name}</span>
+                  {model.badge !== null && <span className="dbq-badge">{model.badge}</span>}
+                  {/* The client's own multiplier, unchanged. A campaign tag
+                      ("限时优惠 0.01x") is styled apart so a temporary promo
+                      cannot be read as the standing price. */}
+                  {model.rate !== null && (
+                    <span className={model.rate.kind === 'promo' ? 'dbq-rate dbq-rate-promo' : 'dbq-rate'}>
+                      {model.rate.text}
+                    </span>
+                  )}
+                </span>
+                {/* The thinking levels this model actually offers, weakest first.
+                    Selecting one is the session's job (the model picker), so this
+                    is a statement of capability, not a control. */}
+                {model.reasoningLevels.length > 0 && (
+                  <span className="dbq-levels">
+                    {model.reasoningLevels.map(level => (
+                      <span
+                        key={level.id}
+                        className={level.verified ? 'dbq-level' : 'dbq-level dbq-level-unverified'}
+                        title={level.verified ? t('models.levelVerified') : t('models.levelUnverified')}
+                      >
+                        {level.name}
+                      </span>
+                    ))}
+                  </span>
+                )}
+              </span>
+            </label>
+          ))}
+        </div>
+
+        <div className="dbq-actions">
+          <button type="button" className="dbq-btn" onClick={() => void loadCatalog()} disabled={catalogBusy}>
+            {catalogBusy ? t('models.refreshing') : t('models.refresh')}
+          </button>
+          <button type="button" className="dbq-btn" onClick={selectAll} disabled={!canWrite}>{t('models.selectAll')}</button>
+          <button type="button" className="dbq-btn" onClick={selectNone} disabled={!canWrite}>{t('models.selectNone')}</button>
+          <button
+            type="button"
+            className={`dbq-btn dbq-primary${dirty ? ' dbq-dirty' : ''}`}
+            onClick={() => void onSave()}
+            disabled={!canWrite || !dirty || busy}
+          >
+            {busy ? t('models.saving') : t('models.save')}
+          </button>
+          {dirty && <span className="dbq-dirty-flag">{t('models.dirty')}</span>}
+          {!dirty && saved && <span className="dbq-saved">{t('models.saved')}</span>}
+          {saveError !== null && <span className="dbq-error">{saveError}</span>}
+        </div>
+      </div>
+
+      {/* ---- experimental: tool emulation ------------------------------ */}
+      <div className="dbq-section">
+        <div className="dbq-section-title">
+          <span>{t('tools.title')}</span>
+          <span className="dbq-count">{toolsOn ? t('tools.enabled') : t('tools.disabled')}</span>
+        </div>
+        <div className="dbq-note">{t('tools.note')}</div>
+        <label className="dbq-model">
+          <input
+            type="checkbox"
+            checked={toolsOn}
+            disabled={!canWrite}
+            onChange={event => void onToggleTools(event.currentTarget.checked)}
+          />
+          <span className="dbq-model-main">
+            <span className="dbq-model-name"><span>{t('tools.toggle')}</span></span>
+          </span>
+        </label>
+        {toolsOn && <div className="dbq-note dbq-warn">{t('tools.warning')}</div>}
+        {toolsError !== null && <span className="dbq-error">{toolsError}</span>}
+      </div>
+    </div>
+  )
+}
+
+export default DoubaoQuotaCard

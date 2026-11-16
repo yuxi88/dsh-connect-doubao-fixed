@@ -1,0 +1,201 @@
+/**
+ * The request body, pinned against a CDP-captured client request.
+ *
+ * WHY THIS FILE EXISTS. On 2026-10-22 every turn from this plugin failed with
+ * `710010702` while the Doubao app answered fine on the same account, same
+ * device, same cookies. The cause was one constant: `agent_mode` is 2 for
+ * ordinary chat and 1 for 「工作任务」, and the plugin sent 1 — so the server
+ * handed every request to `Agent-GeneralTask`, whose executing runtime lives
+ * inside the desktop client and cannot be reached from outside.
+ *
+ * Nothing in the existing suite could have caught that: the client-bundle test
+ * checks how the browser half LOADS, not what the provider ASKS FOR. A wrong
+ * value here is silent — the request is well-formed, the stream answers, and
+ * the failure only shows up as a business error deep in the SSE frames.
+ *
+ * So these assertions are deliberately literal. They are transcribed from the
+ * captured request, not derived from the constants: a test that recomputes the
+ * expected value from the same constant it is checking cannot fail.
+ */
+import { afterEach, describe, expect, it } from 'vitest'
+import { assembleReplyText, buildChatBody } from '../src/doubao-upstream.ts'
+import { DOUBAO_MODELS, doubaoCatalogEntries, findReasoningLevel, levelIdOf } from '../src/doubao-catalog.ts'
+
+/** A body for the default chat turn. */
+function body(overrides: Record<string, unknown> = {}) {
+  return buildChatBody('hello', overrides) as Record<string, any>
+}
+
+afterEach(() => {
+  delete process.env.DSH_DOUBAO_TASK
+  delete process.env.DSH_DOUBAO_MODE_ID
+})
+
+describe('chat mode is what the desktop client actually sends', () => {
+  it('sends agent_mode 2 — NOT 1 (the 710010702 regression)', () => {
+    const b = body()
+    // Literal on purpose: 2 is the captured value. 1 means 「工作任务」.
+    expect(b.option.agent_mode).toBe(2)
+    expect(b.ext.agent_mode).toBe('2')
+    expect(b.option.aggregate_params.agent_mode).toBe('2')
+  })
+
+  it('leaves need_deep_think at 0 and keeps the level in reasoning_effort', () => {
+    const b = body()
+    expect(b.option.need_deep_think).toBe(0)
+    expect(b.ext.use_deep_think).toBe('0')
+    // Default level is 高 → 5, carried by reasoning_effort, mirrored three ways.
+    expect(b.option.model_config.reasoning_effort).toBe(5)
+    expect(b.option.aggregate_params.reasoning_effort).toBe('5')
+    expect(b.option.conversation_init_ext.reasoning_effort).toBe('5')
+  })
+
+  it('declares model + mode + effort in conversation_init_ext', () => {
+    const b = body({ modelKey: '3' })
+    expect(b.option.conversation_init_ext).toEqual({
+      model_item_key: '3',
+      reasoning_effort: '5',
+      mode_id: '1',
+    })
+    expect(b.option.aggregate_params.mode_id).toBe('1')
+  })
+
+  it('carries the client default general_task_param as OBJECT + STRING pair', () => {
+    const b = body()
+    expect(b.option.general_task_param).toEqual({ server_do_compare: true })
+    expect(b.ext.general_task_param).toBe(JSON.stringify({ server_do_compare: true }))
+  })
+
+  it('does not send the invented compatibility markers from the guessing phase', () => {
+    const b = body()
+    // Each of these was added while hunting the bug, none appears in the capture.
+    for (const key of ['general_agent', 'cot_switch', 'bot_source', 'llm_intention', 'chat_ability']) {
+      expect(b.ext).not.toHaveProperty(key)
+    }
+  })
+
+  it('leaves model_extra_params empty, as the client does', () => {
+    expect(body().option.model_config.model_extra_params).toEqual({})
+  })
+
+  it('reports the client permissions the app echoes', () => {
+    expect(body().client_meta.local_permissions).toHaveLength(3)
+  })
+
+  it('starts a new conversation every turn', () => {
+    expect(body().option.need_create_conversation).toBe(true)
+    expect(body().option.conversation_init_option).toEqual({ need_ack_conversation: true })
+  })
+})
+
+describe('task mode stays opt-in and keeps its own shape', () => {
+  it('is off by default', () => {
+    expect(body().option.agent_mode).toBe(2)
+  })
+
+  it('flips to agent_mode 1 with the local-PC runtime when asked', () => {
+    const b = body({ taskMode: true })
+    expect(b.option.agent_mode).toBe(1)
+    expect(b.ext.agent_mode).toBe('1')
+    const param = JSON.parse(b.ext.general_task_param)
+    expect(param.runtime_type).toBe(2) // 2 = Local_PC, 1 = Cloud_VM
+    expect(param.client_option.enable_sandbox).toBe(true)
+    // `option` carries the object; `ext` carries the stringified copy.
+    expect(b.option.general_task_param).toEqual(param)
+  })
+
+  it('can be enabled by environment for a probe run', () => {
+    process.env.DSH_DOUBAO_TASK = '1'
+    expect(body().option.agent_mode).toBe(1)
+  })
+})
+
+describe('a reply is notify opening + chunk deltas, never only one of them', () => {
+  it('keeps the first character, which lives in the notification', () => {
+    // 「1+1等于2。」 used to come back as 「+1等于2。」 because only chunks were read.
+    expect(assembleReplyText('1', '+1等于2。')).toBe('1+1等于2。')
+  })
+
+  it('handles a reply that is entirely in the notification', () => {
+    expect(assembleReplyText('你好', '')).toBe('你好')
+  })
+
+  it('handles a reply with no notification text at all', () => {
+    expect(assembleReplyText('', '好的')).toBe('好的')
+  })
+
+  it('does not duplicate a cumulative chunk stream', () => {
+    expect(assembleReplyText('你好', '你好世界')).toBe('你好世界')
+  })
+
+  it('is empty when nothing arrived', () => {
+    expect(assembleReplyText('', '')).toBe('')
+  })
+})
+
+describe('thinking levels', () => {
+  it('carries the two rungs the client menu declares beyond 高', () => {
+    // 6 (极高) and 7 (最高) used to be clamped to 高 in the shim, so the top half
+    // of DeepSeek / Kimi / 2.1 Max was unreachable from DSH.
+    expect(findReasoningLevel('xhigh').level).toBe(6)
+    expect(findReasoningLevel('max').level).toBe(7)
+    expect(levelIdOf(6)).toBe('xhigh')
+    expect(levelIdOf(7)).toBe('max')
+    // An ordinal the catalog has never seen still reaches the wire as itself.
+    expect(levelIdOf(9)).toBe('9')
+  })
+
+  it('reports a per-model ladder instead of the catalog-wide one', () => {
+    const [glm] = doubaoCatalogEntries([
+      {
+        id: 'person-glm-5-3-261111',
+        name: 'GLM 5.3',
+        reasoning: true,
+        reasoningOptions: [{ level: 3, name: '低' }, { level: 5, name: '高' }, { level: 7, name: '最高' }],
+      },
+    ])
+    expect(glm?.reasoningLevels.map((level) => level.level)).toEqual([3, 5, 7])
+    expect(glm?.reasoningLevels.map((level) => level.name)).toEqual(['低', '高', '最高'])
+    // 最高 is declared by the menu but never observed, so it stays provisional.
+    expect(glm?.reasoningLevels.at(-1)?.verified).toBe(false)
+  })
+
+  it('keeps a rate tag verbatim and exposes it on the catalog entry', () => {
+    const [pro] = doubaoCatalogEntries([
+      { id: '5', name: '豆包 2.1 Pro', reasoning: true, rate: { text: '0.65x', kind: 'ratio' } },
+    ])
+    expect(pro?.rate).toEqual({ text: '0.65x', kind: 'ratio' })
+  })
+})
+
+describe('the advertised catalog is only what actually works', () => {
+  it('offers the 对话-mode models, the 工作任务-mode models (2.1 Lite / 2.1 Pro / 自动), and the image-generation alias', () => {
+    expect(DOUBAO_MODELS.map((m) => m.id)).toEqual(['0', '3', 'seed-lite-7b', '5', '9', 'image-gen'])
+  })
+
+  it('does not advertise the retiring Turbo model', () => {
+    const ids = DOUBAO_MODELS.map((m) => m.id)
+    expect(ids).not.toContain('4')
+  })
+
+  it('automatically switches to 工作任务 mode (mode_id 3, agent_mode 1, need_deep_think 10001) when selecting 2.1 Lite or 2.1 Pro', () => {
+    const lite = body({ modelKey: 'seed-lite-7b' })
+    expect(lite.option.agent_mode).toBe(1)
+    expect(lite.option.need_deep_think).toBe(10001)
+    expect(lite.option.conversation_init_ext.mode_id).toBe('3')
+    expect(lite.option.conversation_init_ext.model_item_key).toBe('seed-lite-7b')
+    expect(lite.option.model_config.model_extra_params).toEqual({
+      input_token_limit: '256k',
+      reasoning_effort: 'high',
+    })
+
+    const pro = body({ modelKey: '5' })
+    expect(pro.option.agent_mode).toBe(1)
+    expect(pro.option.need_deep_think).toBe(10001)
+    expect(pro.option.conversation_init_ext.mode_id).toBe('3')
+    expect(pro.option.conversation_init_ext.model_item_key).toBe('5')
+    expect(pro.option.model_config.model_extra_params).toEqual({
+      input_token_limit: '256k',
+    })
+  })
+})
