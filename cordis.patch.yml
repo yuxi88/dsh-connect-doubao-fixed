@@ -2,5 +2,5 @@
 # The plugin reuses the Doubao desktop app's existing sign-in (it reads the
 # Chromium cookie jar in-process); no separate login flow is started.
 - insert:
-    - id: dsh-connect-doubao-plus
-      name: dsh-connect-doubao-plus
+    - id: dsh-connect-doubao
+      name: dsh-connect-doubao

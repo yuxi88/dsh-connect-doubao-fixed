@@ -1,5 +1,5 @@
 {
-  "name": "dsh-connect-doubao-plus",
+  "name": "dsh-connect-doubao",
   "displayName": "DSH Connect Doubao Plus",
   "description": "把豆包（Doubao）账号接入 DeepSeek Harness：实时发现线上菜单模型、对话框直接展示计费倍率与对比、完整思考链（CoT）推理透传、「工作任务」模型（走会员付费额度）、Seedream 生图，以及原生 Token 用量/会话统计与实时额度看板。只需浏览器扫码登录一次；Windows / macOS / Linux 均支持，会话用 DPAPI（Windows）或 AES-256-GCM（其它平台）密封在本机。",
   "version": "0.9.0",
@@ -19,9 +19,9 @@
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
   "bin": {
-    "dsh-connect-doubao-plus": "lib/bin.js",
-    "dsh-connect-doubao-plus-probe": "lib/cli-probe.js",
-    "dsh-connect-doubao-plus-doctor": "lib/cli-doctor.js"
+    "dsh-connect-doubao": "lib/bin.js",
+    "dsh-connect-doubao-probe": "lib/cli-probe.js",
+    "dsh-connect-doubao-doctor": "lib/cli-doctor.js"
   },
   "exports": {
     ".": {
@@ -54,11 +54,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Chsw-CC/dsh-connect-doubao-plus.git"
+    "url": "git+https://github.com/Chsw-CC/dsh-connect-doubao.git"
   },
-  "homepage": "https://github.com/Chsw-CC/dsh-connect-doubao-plus#readme",
+  "homepage": "https://github.com/Chsw-CC/dsh-connect-doubao#readme",
   "bugs": {
-    "url": "https://github.com/Chsw-CC/dsh-connect-doubao-plus/issues"
+    "url": "https://github.com/Chsw-CC/dsh-connect-doubao/issues"
   },
   "dsh": {
     "bundle": {

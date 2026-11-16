@@ -1,13 +1,20 @@
-> [!NOTE]
-> **来源声明 / Attribution**
+> [!IMPORTANT]
+> **当前状态说明（请先读）**
 >
-> 本仓库为**个人修复备份**,并非原创作品,也不隶属于原作者。
+> **已解决：插件加载 / 启动崩溃。**
+> 本版本已将三处 id 统一为 `dsh-connect-doubao`（`package.json` 的 `name`、`cordis.patch.yml` 的 `- id`/`name`、`lib/client.js` 的模块注册 id），
+> 并补齐了原上游缺失的 `lib/client.js`。已在 DSH 0.2.1-rc.2 实机验证：**可正常加载、DSH 可正常启动、不再触发 `duplicate factory registration`**。
 >
-> - 上游原始项目:[Wahwayhale/dsh-connect-doubao](https://github.com/Wahwayhale/dsh-connect-doubao),采用 **MIT License**(本仓库保留其 `LICENSE` 文件与版权声明)。
-> - 本版本源码来自未合并的 PR [#16](https://github.com/Wahwayhale/dsh-connect-doubao/pull/16)(修复 `710020202` 续传错误)所在 fork:[Chsw-CC/dsh-connect-doubao-plus](https://github.com/Chsw-CC/dsh-connect-doubao-plus)。
-> - 版本 0.9.0,由上述 fork 源码使用 DSH 自带 bun 编译而成。
+> **未解决：对话请求返回 `710020202 common invalid param`。**
+> 该错误与插件版本无关 —— 官方 0.7.1 与本地 0.9.0 都会报同一个错。已定位到的可能原因：
+> 1. **会话 ID 续传失效**：插件按「第一条 user 消息的 SHA256」记住 `conversation_id` 并续传，
+>    若豆包侧该线程已过期/被删除，续传即被拒（源码注释明确记载此现象）；
+> 2. **`person-*` 工作任务模型的请求参数**问题（与 `710010702` 不同，那个是 CUA 运行时缺失，0.4.1 后已修复）。
 >
-> 保留原 MIT 授权条款;原作者保留所有权利。若原作者不希望此备份公开,请联系我,我会立即删除。
+> 排查方法：重启 DSH 清空内存中的 `ConversationStore`，开全新会话先用非 `person-*` 模型（如「豆包 2.1 Turbo」）测试，
+> 以区分是「旧会话 ID 污染」还是「任务模型参数问题」。
+>
+> 因此本仓库**不构成「线路可用」的保证**，仅在插件加载层面可用。
 
 # DSH Connect Doubao Plus
 
@@ -17,7 +24,7 @@
 > 外加一块**只读**额度看板（5 小时限额 / 周额度 / 活动赠送额度，含重置倒计时）。
 > 登录方式只有一种：**浏览器扫码登录一次**。Windows / macOS / Linux 均可 —— 会话在 Windows 上用 DPAPI、其它平台用本地密钥的 AES-256-GCM 密封在本机。
 
-[![release](https://img.shields.io/github/v/release/Chsw-CC/dsh-connect-doubao-plus)](https://github.com/Chsw-CC/dsh-connect-doubao-plus/releases)
+[![release](https://img.shields.io/github/v/release/Chsw-CC/dsh-connect-doubao)](https://github.com/Chsw-CC/dsh-connect-doubao/releases)
 [![license](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 [![dshfind](https://img.shields.io/badge/dshmarket-dshfind-blueviolet)](https://dshfind.dev)
 
@@ -291,7 +298,7 @@ DSH (pi-ai provider)
    读出的值只进请求头，**从不**写日志、命令行、环境变量或其它文件。
 2. **provider**：把 pi-ai 的 OpenAI 形状请求翻译成豆包方言（`bot_id` + `reasoning_effort`）。
 3. **流式**：上游的三行帧被解析成 pi-ai 的事件流，工具调用 / 压缩 / 权限仍由 Harness 掌控。
-4. **只读路由**：`/plugins/dsh-connect-doubao-plus/quota` 与 `/catalog` 提供额度与目录，
+4. **只读路由**：`/plugins/dsh-connect-doubao/quota` 与 `/catalog` 提供额度与目录，
    按**显式允许清单**构造响应，不透传上游任何字段，并拒绝非 loopback 来源。
 
 ---
@@ -302,12 +309,12 @@ DSH (pi-ai provider)
 
 ```bash
 # ① 从 GitHub Release 下载打包好的 tarball，再按本地包安装（推荐）
-dsh plugin --profile desktop add "路径\dsh-connect-doubao-plus-0.9.0.tgz"
+dsh plugin --profile desktop add "路径\dsh-connect-doubao-0.9.0.tgz"
 
 # ② 本地开发（不发布，直接挂源码目录）
-git clone https://github.com/Chsw-CC/dsh-connect-doubao-plus.git
-cd dsh-connect-doubao-plus && npm i && npm run build
-dsh plugin --profile desktop add "路径\dsh-connect-doubao-plus"
+git clone https://github.com/Chsw-CC/dsh-connect-doubao.git
+cd dsh-connect-doubao && npm i && npm run build
+dsh plugin --profile desktop add "路径\dsh-connect-doubao"
 ```
 
 > 方式 ② 会写成 `link:` 依赖，改完源码 `npm run build` 即可，**不需要重装**。
@@ -365,12 +372,12 @@ dsh plugin --profile desktop add "路径\dsh-connect-doubao-plus"
 
 ```bash
 # 体检整条链路（不消耗推理额度）
-dsh-connect-doubao-plus-doctor
-dsh-connect-doubao-plus-doctor --json
+dsh-connect-doubao-doctor
+dsh-connect-doubao-doctor --json
 
 # 冒烟探针（会消耗一次推理额度）
-dsh-connect-doubao-plus-probe --prompt "hi"
-dsh-connect-doubao-plus-probe --prompt "hi" --model 5 --thinking high --json
+dsh-connect-doubao-probe --prompt "hi"
+dsh-connect-doubao-probe --prompt "hi" --model 5 --thinking high --json
 ```
 
 `probe` 的完整参数：
@@ -446,7 +453,7 @@ npm run check       # 以上全部
     读取也不依赖任何宿主服务在线。原因是宿主这条路对本插件**完全关闭**：它的 fiber 永远停在
     `state 1`（LOADING，和 `hmr`、`credentials` 一样），因此 `entry.fiber.runtime.Config`
     从不挂载 → 宿主 `describe()` 直接过滤掉这个命名空间 → 任何写入都以
-    `No configurable plugin entry "dsh-connect-doubao-plus"` 失败。
+    `No configurable plugin entry "dsh-connect-doubao"` 失败。
     **历史上这个插件的设置一次都没能落盘过**（包括手工改的），所以卡片会出现「点了没反应 /
     `host did not persist the value` / 保存成功但刷新后回退」三种症状。
     schema 里仍然保留 `asVolatile()`：那是宿主侧的正当声明，一旦上游修好 fiber 生命周期，
